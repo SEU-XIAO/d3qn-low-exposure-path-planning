@@ -33,6 +33,11 @@ class TrainingConfig:
     max_gradient_norm: float = TrainingDefaults().max_gradient_norm
     seed: int = TrainingDefaults().seed
     exploration: ExplorationConfig = field(default_factory=lambda: TrainingDefaults().exploration)
+    early_stop_enabled: bool = TrainingDefaults().early_stop_enabled
+    early_stop_eval_episodes: int = TrainingDefaults().early_stop_eval_episodes
+    early_stop_success_rate_threshold: float = TrainingDefaults().early_stop_success_rate_threshold
+    early_stop_plateau_patience: int = TrainingDefaults().early_stop_plateau_patience
+    early_stop_min_delta: float = TrainingDefaults().early_stop_min_delta
 
 
 class DoubleDQNAgent:

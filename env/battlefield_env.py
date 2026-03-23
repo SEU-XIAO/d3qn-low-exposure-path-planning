@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
 from math import acos, atan2, degrees
 
@@ -32,23 +33,43 @@ class BattlefieldEnv:
         self.config = config or EnvConfig()
         self.grid_size = self.config.grid_size
         self.height_levels = self.config.height_levels
-        self.agent_position = np.array(self.config.start, dtype=np.int32)
-        self.goal_position = np.array(self.config.goal, dtype=np.int32)
+        self.default_start = np.array(self.config.start, dtype=np.int32)
+        self.default_goal = np.array(self.config.goal, dtype=np.int32)
+        self.default_enemy_xy = np.array(self.config.enemy_position, dtype=np.int32)
+        self.default_enemy_forward = np.array(self.config.enemy_forward, dtype=np.float32)
+
+        self.agent_position = self.default_start.copy()
+        self.goal_position = self.default_goal.copy()
         self.enemy_position = np.array(
-            (self.config.enemy_position[0], self.config.enemy_position[1], self.config.enemy_height),
+            (self.default_enemy_xy[0], self.default_enemy_xy[1], self.config.enemy_height),
             dtype=np.float32,
         )
-        self.enemy_forward = self._normalize(np.array(self.config.enemy_forward, dtype=np.float32))
+        self.enemy_forward = self._normalize(self.default_enemy_forward.copy())
+
         self.height_map = np.zeros((self.grid_size, self.grid_size), dtype=np.int32)
         self.occupancy_map = np.zeros((self.grid_size, self.grid_size), dtype=np.float32)
         self.risk_map = np.zeros((self.grid_size, self.grid_size), dtype=np.float32)
         self.steps = 0
-        self._build_fixed_obstacles()
-        self._recompute_risk_map()
+        self.current_scene_seed: int | None = None
+        self.current_scenario_mode = self.config.scenario_mode
 
-    def reset(self) -> dict[str, np.ndarray]:
-        self.agent_position = np.array(self.config.start, dtype=np.int32)
+        self.reset()
+
+    def reset(self, scene_seed: int | None = None, scenario_mode: str | None = None) -> dict[str, np.ndarray]:
         self.steps = 0
+        if scenario_mode is not None:
+            self.current_scenario_mode = scenario_mode
+        else:
+            self.current_scenario_mode = self.config.scenario_mode
+
+        if self.current_scenario_mode == "random":
+            self.current_scene_seed = scene_seed if scene_seed is not None else np.random.randint(0, 10_000_000)
+            self._generate_random_scene(self.current_scene_seed)
+        else:
+            self.current_scene_seed = scene_seed
+            self._build_fixed_scene()
+
+        self.agent_position = self.start_position.copy()
         return self.get_observation()
 
     def step(self, action: int) -> StepResult:
@@ -92,6 +113,121 @@ class BattlefieldEnv:
             "global_features": self._build_global_features(),
         }
 
+    def _build_fixed_scene(self) -> None:
+        self.height_map = np.zeros((self.grid_size, self.grid_size), dtype=np.int32)
+        center = self.grid_size // 2
+        span = self.config.obstacle_half_span
+
+        self.height_map[center - span : center + span + 1, center - 1 : center + 2] = self.config.obstacle_height
+        self.height_map[center - 1 : center + 2, center - span : center + span + 1] = self.config.obstacle_height
+        self.height_map[center - 2 : center + 3, center + 4 : center + 6] = self.config.obstacle_height - 1
+        self.height_map[center - 5 : center - 3, center - 5 : center + 5] = self.config.obstacle_height - 2
+
+        self.start_position = self.default_start.copy()
+        self.goal_position = self.default_goal.copy()
+        self.enemy_position = np.array(
+            (self.default_enemy_xy[0], self.default_enemy_xy[1], self.config.enemy_height),
+            dtype=np.float32,
+        )
+        self.enemy_forward = self._normalize(self.default_enemy_forward.copy())
+        self._finalize_scene_maps()
+
+    def _generate_random_scene(self, scene_seed: int) -> None:
+        rng = np.random.default_rng(scene_seed)
+
+        for _ in range(128):
+            self.height_map = np.zeros((self.grid_size, self.grid_size), dtype=np.int32)
+            self._place_random_obstacles(rng)
+            start, goal = self._sample_start_goal(rng)
+            enemy_xy = self._sample_enemy_position(rng)
+            enemy_forward = self._sample_enemy_forward(enemy_xy)
+
+            self.start_position = np.array(start, dtype=np.int32)
+            self.goal_position = np.array(goal, dtype=np.int32)
+            self.goal_position = np.array(goal, dtype=np.int32)
+            self.enemy_position = np.array((enemy_xy[0], enemy_xy[1], self.config.enemy_height), dtype=np.float32)
+            self.enemy_forward = self._normalize(enemy_forward)
+            self._finalize_scene_maps()
+
+            if self._has_feasible_path():
+                return
+
+        raise RuntimeError(f"无法为 scene_seed={scene_seed} 生成可达场景")
+
+    def _place_random_obstacles(self, rng: np.random.Generator) -> None:
+        obstacle_count = int(rng.integers(self.config.random_obstacle_count_min, self.config.random_obstacle_count_max + 1))
+        for _ in range(obstacle_count):
+            width = int(rng.integers(self.config.random_obstacle_size_min, self.config.random_obstacle_size_max + 1))
+            height = int(rng.integers(self.config.random_obstacle_size_min, self.config.random_obstacle_size_max + 1))
+            x = int(rng.integers(2, self.grid_size - width - 2))
+            y = int(rng.integers(2, self.grid_size - height - 2))
+            obstacle_h = int(rng.integers(max(2, self.config.obstacle_height - 2), self.config.obstacle_height + 1))
+            self.height_map[x : x + width, y : y + height] = np.maximum(
+                self.height_map[x : x + width, y : y + height], obstacle_h
+            )
+
+    def _sample_start_goal(self, rng: np.random.Generator) -> tuple[tuple[int, int], tuple[int, int]]:
+        boundary_cells = self._boundary_cells()
+        for _ in range(256):
+            start = boundary_cells[int(rng.integers(0, len(boundary_cells)))]
+            goal = boundary_cells[int(rng.integers(0, len(boundary_cells)))]
+            if start == goal:
+                continue
+            if np.linalg.norm(np.array(start) - np.array(goal)) < self.config.min_start_goal_distance:
+                continue
+            if self.height_map[start] > 0 or self.height_map[goal] > 0:
+                continue
+            return start, goal
+        return tuple(self.config.start), tuple(self.config.goal)
+
+    def _sample_enemy_position(self, rng: np.random.Generator) -> tuple[int, int]:
+        boundary_cells = self._boundary_cells()
+        return boundary_cells[int(rng.integers(0, len(boundary_cells)))]
+
+    def _sample_enemy_forward(self, enemy_xy: tuple[int, int]) -> np.ndarray:
+        center = np.array((self.grid_size / 2.0, self.grid_size / 2.0, 1.5), dtype=np.float32)
+        enemy_point = np.array((enemy_xy[0], enemy_xy[1], self.config.enemy_height), dtype=np.float32)
+        return center - enemy_point
+
+    def _boundary_cells(self) -> list[tuple[int, int]]:
+        cells: list[tuple[int, int]] = []
+        max_idx = self.grid_size - 1
+        for i in range(self.grid_size):
+            cells.append((0, i))
+            cells.append((max_idx, i))
+            cells.append((i, 0))
+            cells.append((i, max_idx))
+        return list(dict.fromkeys(cells))
+
+    def _finalize_scene_maps(self) -> None:
+        self.occupancy_map = (self.height_map > 0).astype(np.float32)
+        self.height_map[tuple(self.start_position)] = 0
+        self.height_map[tuple(self.goal_position)] = 0
+        self.occupancy_map[tuple(self.start_position)] = 0.0
+        self.occupancy_map[tuple(self.goal_position)] = 0.0
+        self.risk_map = np.zeros((self.grid_size, self.grid_size), dtype=np.float32)
+        self._recompute_risk_map()
+
+    def _has_feasible_path(self) -> bool:
+        start = tuple(self.start_position.tolist())
+        goal = tuple(self.goal_position.tolist())
+        queue: deque[tuple[int, int]] = deque([start])
+        visited = {start}
+
+        while queue:
+            current = queue.popleft()
+            if current == goal:
+                return True
+            current_arr = np.array(current, dtype=np.int32)
+            for action_idx in self.get_valid_actions(current_arr):
+                move = np.array(self.ACTIONS[action_idx], dtype=np.int32)
+                neighbor = tuple((current_arr + move).tolist())
+                if neighbor in visited:
+                    continue
+                visited.add(neighbor)
+                queue.append(neighbor)
+        return False
+
     def _extract_local_map(self) -> np.ndarray:
         radius = self.config.local_map_size // 2
         padded_occ = np.pad(self.occupancy_map, radius, mode="constant", constant_values=1.0)
@@ -114,8 +250,7 @@ class BattlefieldEnv:
         local_risk = padded_risk[xs, ys]
         local_goal = padded_goal[xs, ys]
 
-        stacked = np.stack((local_occ, local_height, local_risk, local_goal), axis=0).astype(np.float32)
-        return stacked
+        return np.stack((local_occ, local_height, local_risk, local_goal), axis=0).astype(np.float32)
 
     def _build_global_features(self) -> np.ndarray:
         relative_goal = (self.goal_position - self.agent_position).astype(np.float32) / self.grid_size
@@ -126,26 +261,10 @@ class BattlefieldEnv:
         enemy_forward = self.enemy_forward.astype(np.float32)
         current_risk = np.array([self.risk_map[tuple(self.agent_position)]], dtype=np.float32)
 
-        features = np.concatenate(
+        return np.concatenate(
             (relative_goal, relative_enemy, goal_distance, enemy_distance, enemy_forward, current_risk),
             dtype=np.float32,
         )
-        return features
-
-    def _build_fixed_obstacles(self) -> None:
-        center = self.grid_size // 2
-        span = self.config.obstacle_half_span
-
-        self.height_map[center - span : center + span + 1, center - 1 : center + 2] = self.config.obstacle_height
-        self.height_map[center - 1 : center + 2, center - span : center + span + 1] = self.config.obstacle_height
-        self.height_map[center - 2 : center + 3, center + 4 : center + 6] = self.config.obstacle_height - 1
-        self.height_map[center - 5 : center - 3, center - 5 : center + 5] = self.config.obstacle_height - 2
-
-        self.occupancy_map = (self.height_map > 0).astype(np.float32)
-        self.height_map[self.config.start] = 0
-        self.height_map[self.config.goal] = 0
-        self.occupancy_map[self.config.start] = 0.0
-        self.occupancy_map[self.config.goal] = 0.0
 
     def _recompute_risk_map(self) -> None:
         for x in range(self.grid_size):
@@ -173,7 +292,6 @@ class BattlefieldEnv:
             return 0.0
         if vertical_angle > self.config.enemy_vertical_fov_deg / 2.0:
             return 0.0
-
         if self._is_occluded(cell):
             return 0.0
 
@@ -185,15 +303,11 @@ class BattlefieldEnv:
     def _is_occluded(self, cell: tuple[int, int]) -> bool:
         target_height = 1.0
         line_points = self._sample_line(self.enemy_position, np.array((cell[0], cell[1], target_height), dtype=np.float32), samples=40)
-
-        for i, point in enumerate(line_points[1:-1], start=1):
+        for point in line_points[1:-1]:
             gx = int(np.clip(round(point[0]), 0, self.grid_size - 1))
             gy = int(np.clip(round(point[1]), 0, self.grid_size - 1))
             obstacle_height = float(self.height_map[gx, gy])
-            if obstacle_height <= 0:
-                continue
-            sight_height = float(point[2])
-            if obstacle_height >= sight_height:
+            if obstacle_height > 0 and obstacle_height >= float(point[2]):
                 return True
         return False
 
@@ -205,9 +319,9 @@ class BattlefieldEnv:
     def _compute_view_angles(self, direction_unit: np.ndarray) -> tuple[float, float]:
         forward_xy = self.enemy_forward[:2]
         direction_xy = direction_unit[:2]
-
         forward_xy_norm = float(np.linalg.norm(forward_xy))
         direction_xy_norm = float(np.linalg.norm(direction_xy))
+
         if forward_xy_norm < 1e-6 or direction_xy_norm < 1e-6:
             horizontal_angle = 0.0
         else:

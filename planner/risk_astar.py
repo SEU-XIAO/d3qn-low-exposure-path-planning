@@ -30,8 +30,8 @@ class RiskAStarPlanner:
         start: tuple[int, int] | None = None,
         goal: tuple[int, int] | None = None,
     ) -> PathResult:
-        start = start or tuple(self.env.config.start)
-        goal = goal or tuple(self.env.config.goal)
+        start = start or tuple(self.env.agent_position.tolist())
+        goal = goal or tuple(self.env.goal_position.tolist())
 
         frontier: list[tuple[float, tuple[int, int]]] = []
         heapq.heappush(frontier, (0.0, start))

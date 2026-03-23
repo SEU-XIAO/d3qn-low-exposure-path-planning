@@ -6,16 +6,26 @@ import matplotlib.pyplot as plt
 from env.battlefield_env import BattlefieldEnv
 
 
-def plot_scene(save_path: str | None = None) -> None:
+def plot_scene(
+    save_path: str | None = None,
+    scene_seed: int | None = None,
+    scenario_mode: str | None = None,
+) -> None:
     env = BattlefieldEnv()
-    start = np.array(env.config.start, dtype=np.float32)
-    goal = np.array(env.config.goal, dtype=np.float32)
+    env.reset(scene_seed=scene_seed, scenario_mode=scenario_mode)
+    start = env.agent_position.astype(np.float32)
+    goal = env.goal_position.astype(np.float32)
     fig = plt.figure(figsize=(12, 9))
     ax = fig.add_subplot(111, projection="3d")
     draw_3d_scene(ax, env)
     _plot_reference_path(ax, start, goal)
 
-    ax.set_title("32x32x8 Battlefield Layout")
+    title = "32x32x8 Battlefield Layout"
+    if env.current_scenario_mode == "random":
+        title += f" | random seed={env.current_scene_seed}"
+    else:
+        title += " | fixed scene"
+    ax.set_title(title)
 
     if save_path:
         plt.savefig(save_path, dpi=180, bbox_inches="tight")
@@ -41,9 +51,10 @@ def draw_3d_scene(ax: plt.Axes, env: BattlefieldEnv) -> None:
     dz_bar = height_map[mask].astype(np.float32)
     ax.bar3d(x_bar, y_bar, z_bar, dx_bar, dy_bar, dz_bar, color="#8c6d46", alpha=0.75, shade=True)
 
-    start = np.array(config.start, dtype=np.float32)
-    goal = np.array(config.goal, dtype=np.float32)
+    start = env.agent_position.astype(np.float32)
+    goal = env.goal_position.astype(np.float32)
     enemy = np.array((config.enemy_position[0], config.enemy_position[1], config.enemy_height), dtype=np.float32)
+    enemy[:2] = env.enemy_position[:2]
 
     ax.scatter(start[0] + 0.4, start[1] + 0.4, 0.45, color="green", s=80, label="Start")
     ax.scatter(goal[0] + 0.4, goal[1] + 0.4, 0.45, color="blue", s=80, label="Goal")

@@ -10,18 +10,38 @@ from train.dqn_agent import DoubleDQNAgent, TrainingConfig
 from visualize.plot_scene import draw_3d_scene
 
 
-def plot_episode(checkpoint_name: str = "ddqn_latest.pt", save_path: str | None = None) -> None:
-    path_cells, env = _collect_dqn_path(checkpoint_name)
-    _render_single_path_3d(env, path_cells, "3D DQN Episode Path", save_path)
+def plot_episode(
+    checkpoint_name: str = "ddqn_latest.pt",
+    save_path: str | None = None,
+    scene_seed: int | None = None,
+    scenario_mode: str = "fixed",
+) -> None:
+    path_cells, env = _collect_dqn_path(checkpoint_name, scene_seed=scene_seed, scenario_mode=scenario_mode)
+    _render_single_path_3d(env, path_cells, _build_title("3D D3QN Episode Path", env), save_path)
 
 
-def plot_comparison(checkpoint_name: str = "ddqn_latest.pt", save_path: str | None = None) -> None:
-    dqn_path, env = _collect_dqn_path(checkpoint_name)
+def plot_comparison(
+    checkpoint_name: str = "ddqn_latest.pt",
+    save_path: str | None = None,
+    scene_seed: int | None = None,
+    scenario_mode: str = "fixed",
+) -> None:
+    dqn_path, env = _collect_dqn_path(checkpoint_name, scene_seed=scene_seed, scenario_mode=scenario_mode)
     astar_path = RiskAStarPlanner(env).plan().path
-    _render_comparison_3d(env, dqn_path, astar_path, save_path)
+    _render_comparison_3d(
+        env,
+        dqn_path,
+        astar_path,
+        _build_title("3D D3QN vs Risk-A* Path Comparison", env),
+        save_path,
+    )
 
 
-def _collect_dqn_path(checkpoint_name: str) -> tuple[list[tuple[int, int]], BattlefieldEnv]:
+def _collect_dqn_path(
+    checkpoint_name: str,
+    scene_seed: int | None = None,
+    scenario_mode: str = "fixed",
+) -> tuple[list[tuple[int, int]], BattlefieldEnv]:
     root_dir = Path(__file__).resolve().parents[1]
     checkpoint_path = root_dir / "artifacts" / checkpoint_name
     if not checkpoint_path.exists():
@@ -31,13 +51,13 @@ def _collect_dqn_path(checkpoint_name: str) -> tuple[list[tuple[int, int]], Batt
     agent = DoubleDQNAgent(action_dim=len(BattlefieldEnv.ACTIONS), config=TrainingConfig())
     agent.load(str(checkpoint_path))
 
-    env.reset()
+    env.reset(scene_seed=scene_seed, scenario_mode=scenario_mode)
     path_cells = [tuple(env.agent_position.tolist())]
     done = False
 
     while not done:
         observation = env.get_observation()
-        action = agent.select_action(observation, epsilon=0.0)
+        action = agent.select_action(observation, epsilon=0.0, env=env)
         result = env.step(action)
         path_cells.append(tuple(env.agent_position.tolist()))
         done = result.done
@@ -54,7 +74,7 @@ def _render_single_path_3d(
     fig = plt.figure(figsize=(12, 9))
     ax = fig.add_subplot(111, projection="3d")
     draw_3d_scene(ax, env)
-    _plot_path_3d(ax, path_cells, color="#1f77b4", label="DQN Path", z_offset=0.18, linestyle="-")
+    _plot_path_3d(ax, path_cells, color="#1f77b4", label="D3QN Path", z_offset=0.18, linestyle="-")
     ax.set_title(title)
 
     if save_path:
@@ -67,15 +87,16 @@ def _render_comparison_3d(
     env: BattlefieldEnv,
     dqn_path: list[tuple[int, int]],
     astar_path: list[tuple[int, int]],
+    title: str,
     save_path: str | None,
 ) -> None:
     fig = plt.figure(figsize=(12.5, 9.5))
     ax = fig.add_subplot(111, projection="3d")
     draw_3d_scene(ax, env)
 
-    _plot_path_3d(ax, dqn_path, color="#1f77b4", label="Double DQN", z_offset=0.22, linestyle="-")
+    _plot_path_3d(ax, dqn_path, color="#1f77b4", label="D3QN", z_offset=0.22, linestyle="-")
     _plot_path_3d(ax, astar_path, color="#ff9f1c", label="Risk-A*", z_offset=0.42, linestyle="--")
-    ax.set_title("3D DQN vs Risk-A* Path Comparison")
+    ax.set_title(title)
 
     if save_path:
         plt.savefig(save_path, dpi=180, bbox_inches="tight")
@@ -98,6 +119,12 @@ def _plot_path_3d(
     ax.plot(xs, ys, zs, color=color, linewidth=2.5, linestyle=linestyle, label=label)
     ax.scatter(xs[0], ys[0], zs[0], color=color, s=24, alpha=0.9)
     ax.scatter(xs[-1], ys[-1], zs[-1], color=color, s=30, alpha=0.9)
+
+
+def _build_title(prefix: str, env: BattlefieldEnv) -> str:
+    if env.current_scenario_mode == "random":
+        return f"{prefix} | random seed={env.current_scene_seed}"
+    return f"{prefix} | fixed scene"
 
 
 if __name__ == "__main__":
