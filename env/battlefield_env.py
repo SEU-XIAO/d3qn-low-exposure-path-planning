@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
-from math import acos, atan2, degrees
+from math import acos, degrees, sqrt
 
 import numpy as np
 
@@ -40,16 +40,19 @@ class BattlefieldEnv:
 
         self.agent_position = self.default_start.copy()
         self.goal_position = self.default_goal.copy()
-        self.enemy_position = np.array(
-            (self.default_enemy_xy[0], self.default_enemy_xy[1], self.config.enemy_height),
-            dtype=np.float32,
-        )
+        self.start_position = self.default_start.copy()
+        self.enemy_position = np.array((self.default_enemy_xy[0], self.default_enemy_xy[1], 0.0), dtype=np.float32)
         self.enemy_forward = self._normalize(self.default_enemy_forward.copy())
 
         self.height_map = np.zeros((self.grid_size, self.grid_size), dtype=np.int32)
         self.occupancy_map = np.zeros((self.grid_size, self.grid_size), dtype=np.float32)
-        self.risk_map = np.zeros((self.grid_size, self.grid_size), dtype=np.float32)
+        self.visibility_map = np.zeros((self.grid_size, self.grid_size), dtype=np.float32)
+        self.cover_map = np.ones((self.grid_size, self.grid_size), dtype=np.float32)
+
         self.steps = 0
+        self.total_path_length = 0.0
+        self.visible_path_length = 0.0
+        self.hidden_path_length = 0.0
         self.current_scene_seed: int | None = None
         self.current_scenario_mode = self.config.scenario_mode
 
@@ -57,13 +60,17 @@ class BattlefieldEnv:
 
     def reset(self, scene_seed: int | None = None, scenario_mode: str | None = None) -> dict[str, np.ndarray]:
         self.steps = 0
+        self.total_path_length = 0.0
+        self.visible_path_length = 0.0
+        self.hidden_path_length = 0.0
+
         if scenario_mode is not None:
             self.current_scenario_mode = scenario_mode
         else:
             self.current_scenario_mode = self.config.scenario_mode
 
         if self.current_scenario_mode == "random":
-            self.current_scene_seed = scene_seed if scene_seed is not None else np.random.randint(0, 10_000_000)
+            self.current_scene_seed = scene_seed if scene_seed is not None else int(np.random.randint(0, 10_000_000))
             self._generate_random_scene(self.current_scene_seed)
         else:
             self.current_scene_seed = scene_seed
@@ -76,36 +83,70 @@ class BattlefieldEnv:
         self.steps += 1
         move = np.array(self.ACTIONS[action], dtype=np.int32)
         candidate = self.agent_position + move
-        reward = -self.config.step_penalty
+        move_cost = self._move_cost(move)
+        # 步进惩罚
+        reward = -self.config.step_penalty * move_cost
         done = False
         collision = False
         previous_distance = self._goal_distance(self.agent_position)
+        previous_hidden_ratio = self.hidden_ratio
 
         if self._is_blocked(candidate):
+            # 碰撞惩罚
             reward -= self.config.collision_penalty
             collision = True
         else:
+            # 维护路径长度相关的变量
             self.agent_position = candidate
-
-        current_risk = float(self.risk_map[tuple(self.agent_position)])
-        reward -= current_risk * self.config.risk_weight
+            current_visibility = float(self.visibility_map[tuple(self.agent_position)])
+            self.total_path_length += move_cost
+            self.visible_path_length += move_cost * current_visibility
+            self.hidden_path_length += move_cost * (1.0 - current_visibility)
+            # 暴露惩罚
+            reward -= self.config.visible_penalty * move_cost * current_visibility
 
         new_distance = self._goal_distance(self.agent_position)
+        # 总体朝着目标接近的奖励
         reward += (previous_distance - new_distance) * self.config.progress_weight
 
-        if np.array_equal(self.agent_position, self.goal_position):
+        current_hidden_ratio = self.hidden_ratio
+        # 路线被遮挡比例上升带来的奖励
+        reward += self.config.hidden_ratio_gain_weight * (current_hidden_ratio - previous_hidden_ratio)
+
+        success = np.array_equal(self.agent_position, self.goal_position)
+        if success:
             reward += self.config.goal_reward
+            reward += self.config.success_hidden_ratio_weight * current_hidden_ratio
             done = True
 
         if self.steps >= self.config.max_steps:
             done = True
 
+        current_visibility = float(self.visibility_map[tuple(self.agent_position)])
         return StepResult(
             observation=self.get_observation(),
             reward=reward,
             done=done,
-            info={"collision": collision, "risk": current_risk, "success": np.array_equal(self.agent_position, self.goal_position)},
+            info={
+                "collision": collision,
+                "visibility": current_visibility,
+                "hidden_ratio": current_hidden_ratio,
+                "path_length": self.total_path_length,
+                "success": success,
+            },
         )
+
+    @property
+    def hidden_ratio(self) -> float:
+        if self.total_path_length <= 1e-6:
+            return 1.0
+        return float(self.hidden_path_length / self.total_path_length)
+
+    @property
+    def visible_ratio(self) -> float:
+        if self.total_path_length <= 1e-6:
+            return 0.0
+        return float(self.visible_path_length / self.total_path_length)
 
     def get_observation(self) -> dict[str, np.ndarray]:
         return {
@@ -125,10 +166,7 @@ class BattlefieldEnv:
 
         self.start_position = self.default_start.copy()
         self.goal_position = self.default_goal.copy()
-        self.enemy_position = np.array(
-            (self.default_enemy_xy[0], self.default_enemy_xy[1], self.config.enemy_height),
-            dtype=np.float32,
-        )
+        self.enemy_position = np.array((self.default_enemy_xy[0], self.default_enemy_xy[1], 0.0), dtype=np.float32)
         self.enemy_forward = self._normalize(self.default_enemy_forward.copy())
         self._finalize_scene_maps()
 
@@ -139,14 +177,11 @@ class BattlefieldEnv:
             self.height_map = np.zeros((self.grid_size, self.grid_size), dtype=np.int32)
             self._place_random_obstacles(rng)
             start, goal = self._sample_start_goal(rng)
-            enemy_xy = self._sample_enemy_position(rng)
-            enemy_forward = self._sample_enemy_forward(enemy_xy)
 
             self.start_position = np.array(start, dtype=np.int32)
             self.goal_position = np.array(goal, dtype=np.int32)
-            self.goal_position = np.array(goal, dtype=np.int32)
-            self.enemy_position = np.array((enemy_xy[0], enemy_xy[1], self.config.enemy_height), dtype=np.float32)
-            self.enemy_forward = self._normalize(enemy_forward)
+            self.enemy_position = np.array((self.default_enemy_xy[0], self.default_enemy_xy[1], 0.0), dtype=np.float32)
+            self.enemy_forward = self._normalize(self._sample_enemy_forward(self.default_enemy_xy))
             self._finalize_scene_maps()
 
             if self._has_feasible_path():
@@ -163,41 +198,36 @@ class BattlefieldEnv:
             y = int(rng.integers(2, self.grid_size - height - 2))
             obstacle_h = int(rng.integers(max(2, self.config.obstacle_height - 2), self.config.obstacle_height + 1))
             self.height_map[x : x + width, y : y + height] = np.maximum(
-                self.height_map[x : x + width, y : y + height], obstacle_h
+                self.height_map[x : x + width, y : y + height],
+                obstacle_h,
             )
 
     def _sample_start_goal(self, rng: np.random.Generator) -> tuple[tuple[int, int], tuple[int, int]]:
-        boundary_cells = self._boundary_cells()
-        for _ in range(256):
-            start = boundary_cells[int(rng.integers(0, len(boundary_cells)))]
-            goal = boundary_cells[int(rng.integers(0, len(boundary_cells)))]
+        free_cells = self._free_cells()
+        enemy_xy = self.default_enemy_xy.astype(np.float32)
+        for _ in range(512):
+            start = free_cells[int(rng.integers(0, len(free_cells)))]
+            goal = free_cells[int(rng.integers(0, len(free_cells)))]
             if start == goal:
                 continue
-            if np.linalg.norm(np.array(start) - np.array(goal)) < self.config.min_start_goal_distance:
+            if np.linalg.norm(np.array(start, dtype=np.float32) - np.array(goal, dtype=np.float32)) < self.config.min_start_goal_distance:
                 continue
-            if self.height_map[start] > 0 or self.height_map[goal] > 0:
+            if np.linalg.norm(np.array(goal, dtype=np.float32) - enemy_xy) < self.config.enemy_goal_min_distance:
                 continue
             return start, goal
         return tuple(self.config.start), tuple(self.config.goal)
 
-    def _sample_enemy_position(self, rng: np.random.Generator) -> tuple[int, int]:
-        boundary_cells = self._boundary_cells()
-        return boundary_cells[int(rng.integers(0, len(boundary_cells)))]
-
-    def _sample_enemy_forward(self, enemy_xy: tuple[int, int]) -> np.ndarray:
-        center = np.array((self.grid_size / 2.0, self.grid_size / 2.0, 1.5), dtype=np.float32)
-        enemy_point = np.array((enemy_xy[0], enemy_xy[1], self.config.enemy_height), dtype=np.float32)
-        return center - enemy_point
-
-    def _boundary_cells(self) -> list[tuple[int, int]]:
+    def _free_cells(self) -> list[tuple[int, int]]:
         cells: list[tuple[int, int]] = []
-        max_idx = self.grid_size - 1
-        for i in range(self.grid_size):
-            cells.append((0, i))
-            cells.append((max_idx, i))
-            cells.append((i, 0))
-            cells.append((i, max_idx))
-        return list(dict.fromkeys(cells))
+        for x in range(self.grid_size):
+            for y in range(self.grid_size):
+                if self.height_map[x, y] == 0:
+                    cells.append((x, y))
+        return cells
+
+    def _sample_enemy_forward(self, enemy_xy: np.ndarray) -> np.ndarray:
+        center = np.array((self.grid_size / 2.0, self.grid_size / 2.0), dtype=np.float32)
+        return center - enemy_xy.astype(np.float32)
 
     def _finalize_scene_maps(self) -> None:
         self.occupancy_map = (self.height_map > 0).astype(np.float32)
@@ -205,8 +235,9 @@ class BattlefieldEnv:
         self.height_map[tuple(self.goal_position)] = 0
         self.occupancy_map[tuple(self.start_position)] = 0.0
         self.occupancy_map[tuple(self.goal_position)] = 0.0
-        self.risk_map = np.zeros((self.grid_size, self.grid_size), dtype=np.float32)
-        self._recompute_risk_map()
+        self.visibility_map = np.zeros((self.grid_size, self.grid_size), dtype=np.float32)
+        self.cover_map = np.ones((self.grid_size, self.grid_size), dtype=np.float32)
+        self._recompute_visibility_map()
 
     def _has_feasible_path(self) -> bool:
         start = tuple(self.start_position.tolist())
@@ -232,7 +263,7 @@ class BattlefieldEnv:
         radius = self.config.local_map_size // 2
         padded_occ = np.pad(self.occupancy_map, radius, mode="constant", constant_values=1.0)
         padded_height = np.pad(self.height_map.astype(np.float32), radius, mode="constant")
-        padded_risk = np.pad(self.risk_map, radius, mode="constant")
+        padded_visibility = np.pad(self.visibility_map, radius, mode="constant")
         padded_goal = np.pad(np.zeros_like(self.occupancy_map, dtype=np.float32), radius, mode="constant")
 
         ax, ay = self.agent_position + radius
@@ -247,67 +278,58 @@ class BattlefieldEnv:
 
         local_occ = padded_occ[xs, ys]
         local_height = padded_height[xs, ys] / max(1, self.height_levels - 1)
-        local_risk = padded_risk[xs, ys]
+        local_visibility = padded_visibility[xs, ys]
         local_goal = padded_goal[xs, ys]
 
-        return np.stack((local_occ, local_height, local_risk, local_goal), axis=0).astype(np.float32)
+        return np.stack((local_occ, local_height, local_visibility, local_goal), axis=0).astype(np.float32)
 
     def _build_global_features(self) -> np.ndarray:
         relative_goal = (self.goal_position - self.agent_position).astype(np.float32) / self.grid_size
-        agent_point = np.array((self.agent_position[0], self.agent_position[1], 1.0), dtype=np.float32)
-        relative_enemy = (self.enemy_position - agent_point) / self.grid_size
+        relative_enemy = (self.enemy_position[:2] - self.agent_position.astype(np.float32)) / self.grid_size
         goal_distance = np.array([self._goal_distance(self.agent_position) / self.grid_size], dtype=np.float32)
         enemy_distance = np.array([np.linalg.norm(relative_enemy)], dtype=np.float32)
         enemy_forward = self.enemy_forward.astype(np.float32)
-        current_risk = np.array([self.risk_map[tuple(self.agent_position)]], dtype=np.float32)
+        current_visibility = np.array([self.visibility_map[tuple(self.agent_position)]], dtype=np.float32)
+        hidden_ratio = np.array([self.hidden_ratio], dtype=np.float32)
 
         return np.concatenate(
-            (relative_goal, relative_enemy, goal_distance, enemy_distance, enemy_forward, current_risk),
+            (relative_goal, relative_enemy, goal_distance, enemy_distance, enemy_forward, current_visibility, hidden_ratio),
             dtype=np.float32,
         )
 
-    def _recompute_risk_map(self) -> None:
+    def _recompute_visibility_map(self) -> None:
         for x in range(self.grid_size):
             for y in range(self.grid_size):
-                self.risk_map[x, y] = self._compute_cell_risk((x, y))
+                visibility = self._compute_cell_visibility((x, y))
+                self.visibility_map[x, y] = visibility
+                self.cover_map[x, y] = 1.0 - visibility
 
-    def _compute_cell_risk(self, cell: tuple[int, int]) -> float:
+    def _compute_cell_visibility(self, cell: tuple[int, int]) -> float:
         if self.occupancy_map[cell] > 0:
             return 0.0
 
-        target = np.array((cell[0], cell[1], 1.0), dtype=np.float32)
-        direction = target - self.enemy_position
+        direction = np.array((cell[0], cell[1]), dtype=np.float32) - self.enemy_position[:2]
         distance = float(np.linalg.norm(direction))
         if distance < 1e-6 or distance > self.config.enemy_max_range:
             return 0.0
 
         direction_unit = direction / distance
         total_cosine = float(np.clip(np.dot(direction_unit, self.enemy_forward), -1.0, 1.0))
-        total_angle = degrees(acos(total_cosine))
-        if total_angle >= 89.9:
-            return 0.0
-
-        horizontal_angle, vertical_angle = self._compute_view_angles(direction_unit)
+        horizontal_angle = degrees(acos(total_cosine))
         if horizontal_angle > self.config.enemy_horizontal_fov_deg / 2.0:
-            return 0.0
-        if vertical_angle > self.config.enemy_vertical_fov_deg / 2.0:
             return 0.0
         if self._is_occluded(cell):
             return 0.0
-
-        distance_risk = 1.0 - distance / self.config.enemy_max_range
-        horizontal_risk = 1.0 - horizontal_angle / max(1.0, self.config.enemy_horizontal_fov_deg / 2.0)
-        vertical_risk = 1.0 - vertical_angle / max(1.0, self.config.enemy_vertical_fov_deg / 2.0)
-        return float(np.clip(0.45 * distance_risk + 0.35 * horizontal_risk + 0.20 * vertical_risk, 0.0, 1.0))
+        return 1.0
 
     def _is_occluded(self, cell: tuple[int, int]) -> bool:
-        target_height = 1.0
-        line_points = self._sample_line(self.enemy_position, np.array((cell[0], cell[1], target_height), dtype=np.float32), samples=40)
+        start = self.enemy_position[:2]
+        end = np.array((cell[0], cell[1]), dtype=np.float32)
+        line_points = self._sample_line(start, end, samples=40)
         for point in line_points[1:-1]:
             gx = int(np.clip(round(point[0]), 0, self.grid_size - 1))
             gy = int(np.clip(round(point[1]), 0, self.grid_size - 1))
-            obstacle_height = float(self.height_map[gx, gy])
-            if obstacle_height > 0 and obstacle_height >= float(point[2]):
+            if self.height_map[gx, gy] > 0:
                 return True
         return False
 
@@ -315,25 +337,6 @@ class BattlefieldEnv:
     def _sample_line(start: np.ndarray, end: np.ndarray, samples: int) -> np.ndarray:
         ratios = np.linspace(0.0, 1.0, num=samples, dtype=np.float32)
         return start[None, :] * (1.0 - ratios[:, None]) + end[None, :] * ratios[:, None]
-
-    def _compute_view_angles(self, direction_unit: np.ndarray) -> tuple[float, float]:
-        forward_xy = self.enemy_forward[:2]
-        direction_xy = direction_unit[:2]
-        forward_xy_norm = float(np.linalg.norm(forward_xy))
-        direction_xy_norm = float(np.linalg.norm(direction_xy))
-
-        if forward_xy_norm < 1e-6 or direction_xy_norm < 1e-6:
-            horizontal_angle = 0.0
-        else:
-            horizontal_cosine = float(
-                np.clip(np.dot(forward_xy / forward_xy_norm, direction_xy / direction_xy_norm), -1.0, 1.0)
-            )
-            horizontal_angle = degrees(acos(horizontal_cosine))
-
-        forward_pitch = degrees(atan2(float(self.enemy_forward[2]), max(forward_xy_norm, 1e-6)))
-        direction_pitch = degrees(atan2(float(direction_unit[2]), max(direction_xy_norm, 1e-6)))
-        vertical_angle = abs(direction_pitch - forward_pitch)
-        return horizontal_angle, vertical_angle
 
     def _is_blocked(self, position: np.ndarray) -> bool:
         x, y = int(position[0]), int(position[1])
@@ -352,6 +355,10 @@ class BattlefieldEnv:
 
     def _goal_distance(self, position: np.ndarray) -> float:
         return float(np.linalg.norm(self.goal_position.astype(np.float32) - position.astype(np.float32)))
+
+    @staticmethod
+    def _move_cost(move: np.ndarray) -> float:
+        return sqrt(2.0) if abs(int(move[0])) + abs(int(move[1])) == 2 else 1.0
 
     @staticmethod
     def _normalize(vector: np.ndarray) -> np.ndarray:

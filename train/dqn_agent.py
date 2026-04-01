@@ -10,7 +10,7 @@ from torch import nn
 from config import ExplorationConfig, TrainingDefaults
 from env.battlefield_env import BattlefieldEnv
 from models.policy_network import HybridPolicyNetwork
-from planner.risk_astar import RiskAStarPlanner
+from planner.visibility_astar import VisibilityAwareAStarPlanner
 from train.replay_buffer import ReplayBuffer
 
 
@@ -121,7 +121,7 @@ class DoubleDQNAgent:
     def _teacher_action(self, env: BattlefieldEnv) -> int | None:
         start = tuple(env.agent_position.tolist())
         goal = tuple(env.goal_position.tolist())
-        result = RiskAStarPlanner(env).plan(start=start, goal=goal)
+        result = VisibilityAwareAStarPlanner(env).plan(start=start, goal=goal)
         if not result.success or len(result.path) < 2:
             return None
 

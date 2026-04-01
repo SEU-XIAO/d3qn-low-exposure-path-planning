@@ -3,21 +3,33 @@ from dataclasses import dataclass, field
 
 @dataclass(frozen=True)
 class EnvConfig:
+    # 栅格大小
     grid_size: int = 32
+    # 最大高度，没啥用，实际上是当一个二维平面来看的
     height_levels: int = 8
+    # 智能体的视野范围大小
     local_map_size: int = 11
+    # 允许智能体走的最大的步数
     max_steps: int = 96
+
     scenario_mode: str = "fixed"
+    # 敌人最大视野张角
     enemy_horizontal_fov_deg: float = 70.0
-    enemy_vertical_fov_deg: float = 55.0
+    # 敌人最大视野半径
     enemy_max_range: float = 24.0
-    enemy_height: int = 4
+    # 敌人离目标最小距离
+    enemy_goal_min_distance: float = 10.0
+    # 障碍物高度
     obstacle_height: int = 5
+
     obstacle_half_span: int = 3
+
     random_obstacle_count_min: int = 5
     random_obstacle_count_max: int = 9
+
     random_obstacle_size_min: int = 2
     random_obstacle_size_max: int = 6
+
     min_start_goal_distance: float = 18.0
     train_scene_seeds: tuple[int, ...] = tuple(range(1000, 1100))
     val_scene_seeds: tuple[int, ...] = tuple(range(2000, 2020))
@@ -25,18 +37,21 @@ class EnvConfig:
     start: tuple[int, int] = (2, 2)
     goal: tuple[int, int] = (29, 29)
     enemy_position: tuple[int, int] = (0, 16)
-    enemy_forward: tuple[float, float, float] = (1.0, 0.0, 0.0)
-    step_penalty: float = 0.05
-    risk_weight: float = 1.2
-    progress_weight: float = 0.15
+    enemy_forward: tuple[float, float] = (1.0, 0.0)
+    
+    step_penalty: float = 0.08
+    visible_penalty: float = 1.25
+    progress_weight: float = 0.20
+    hidden_ratio_gain_weight: float = 0.75
     goal_reward: float = 15.0
+    success_hidden_ratio_weight: float = 4.0
     collision_penalty: float = 1.0
 
 
 @dataclass(frozen=True)
 class ModelConfig:
     local_channels: int = 4
-    global_feature_dim: int = 11
+    global_feature_dim: int = 10
     action_dim: int = 8
 
 

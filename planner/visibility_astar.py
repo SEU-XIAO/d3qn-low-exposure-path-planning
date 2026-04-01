@@ -4,8 +4,6 @@ from dataclasses import dataclass
 import heapq
 from math import sqrt
 
-import numpy as np
-
 from env.battlefield_env import BattlefieldEnv
 
 
@@ -14,15 +12,17 @@ class PathResult:
     path: list[tuple[int, int]]
     total_cost: float
     path_length: float
-    cumulative_risk: float
+    visible_path_length: float
+    hidden_path_length: float
+    hidden_ratio: float
     steps: int
     success: bool
 
 
-class RiskAStarPlanner:
-    def __init__(self, env: BattlefieldEnv, risk_weight: float = 6.0) -> None:
+class VisibilityAwareAStarPlanner:
+    def __init__(self, env: BattlefieldEnv, visible_weight: float = 6.0) -> None:
         self.env = env
-        self.risk_weight = risk_weight
+        self.visible_weight = visible_weight
         self.moves = BattlefieldEnv.ACTIONS
 
     def plan(
@@ -50,8 +50,8 @@ class RiskAStarPlanner:
                     continue
 
                 move_cost = sqrt(2.0) if abs(dx) + abs(dy) == 2 else 1.0
-                risk_cost = self.risk_weight * float(self.env.risk_map[neighbor])
-                tentative_cost = g_cost[current] + move_cost + risk_cost
+                visibility_cost = self.visible_weight * move_cost * float(self.env.visibility_map[neighbor])
+                tentative_cost = g_cost[current] + move_cost + visibility_cost
 
                 if neighbor not in g_cost or tentative_cost < g_cost[neighbor]:
                     g_cost[neighbor] = tentative_cost
@@ -63,7 +63,9 @@ class RiskAStarPlanner:
             path=[start],
             total_cost=float("inf"),
             path_length=0.0,
-            cumulative_risk=0.0,
+            visible_path_length=0.0,
+            hidden_path_length=0.0,
+            hidden_ratio=1.0,
             steps=0,
             success=False,
         )
@@ -82,21 +84,28 @@ class RiskAStarPlanner:
         path.reverse()
 
         path_length = 0.0
-        cumulative_risk = 0.0
+        visible_path_length = 0.0
+        hidden_path_length = 0.0
         for idx, cell in enumerate(path):
-            cumulative_risk += float(self.env.risk_map[cell])
             if idx == 0:
                 continue
             prev = path[idx - 1]
             dx = abs(cell[0] - prev[0])
             dy = abs(cell[1] - prev[1])
-            path_length += sqrt(2.0) if dx + dy == 2 else 1.0
+            move_cost = sqrt(2.0) if dx + dy == 2 else 1.0
+            path_length += move_cost
+            visibility = float(self.env.visibility_map[cell])
+            visible_path_length += move_cost * visibility
+            hidden_path_length += move_cost * (1.0 - visibility)
 
+        hidden_ratio = hidden_path_length / max(path_length, 1e-6) if path_length > 0 else 1.0
         return PathResult(
             path=path,
             total_cost=total_cost,
             path_length=path_length,
-            cumulative_risk=cumulative_risk,
+            visible_path_length=visible_path_length,
+            hidden_path_length=hidden_path_length,
+            hidden_ratio=hidden_ratio,
             steps=max(0, len(path) - 1),
             success=True,
         )

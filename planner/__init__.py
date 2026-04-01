@@ -1,3 +1,3 @@
-from .risk_astar import PathResult, RiskAStarPlanner
+from .visibility_astar import PathResult, VisibilityAwareAStarPlanner
 
-__all__ = ["PathResult", "RiskAStarPlanner"]
+__all__ = ["PathResult", "VisibilityAwareAStarPlanner"]

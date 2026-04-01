@@ -1,8 +1,9 @@
 from __future__ import annotations
-
+import sys
+import os
 import numpy as np
 import matplotlib.pyplot as plt
-
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from env.battlefield_env import BattlefieldEnv
 
 
@@ -53,12 +54,11 @@ def draw_3d_scene(ax: plt.Axes, env: BattlefieldEnv) -> None:
 
     start = env.agent_position.astype(np.float32)
     goal = env.goal_position.astype(np.float32)
-    enemy = np.array((config.enemy_position[0], config.enemy_position[1], config.enemy_height), dtype=np.float32)
-    enemy[:2] = env.enemy_position[:2]
+    enemy = env.enemy_position.astype(np.float32)
 
     ax.scatter(start[0] + 0.4, start[1] + 0.4, 0.45, color="green", s=80, label="Start")
     ax.scatter(goal[0] + 0.4, goal[1] + 0.4, 0.45, color="blue", s=80, label="Goal")
-    ax.scatter(enemy[0] + 0.4, enemy[1] + 0.4, enemy[2], color="red", s=90, label="Enemy")
+    ax.scatter(enemy[0] + 0.4, enemy[1] + 0.4, 0.05, color="red", s=90, label="Enemy")
 
     _plot_enemy_fov(ax, env)
     ax.set_xlabel("X")
@@ -68,7 +68,6 @@ def draw_3d_scene(ax: plt.Axes, env: BattlefieldEnv) -> None:
     ax.set_ylim(0, config.grid_size)
     ax.set_zlim(0, config.height_levels)
     ax.view_init(elev=28, azim=-60)
-    ax.legend(loc="upper right")
 
 
 def _plot_enemy_fov(ax: plt.Axes, env: BattlefieldEnv) -> None:
@@ -76,35 +75,25 @@ def _plot_enemy_fov(ax: plt.Axes, env: BattlefieldEnv) -> None:
     enemy = env.enemy_position
     forward = env.enemy_forward
     horizontal_half = np.deg2rad(config.enemy_horizontal_fov_deg / 2.0)
-    vertical_half = np.deg2rad(config.enemy_vertical_fov_deg / 2.0)
     yaw_center = np.arctan2(forward[1], forward[0])
-    pitch_center = np.arctan2(forward[2], np.linalg.norm(forward[:2]))
-
-    yaw_values = np.linspace(yaw_center - horizontal_half, yaw_center + horizontal_half, 36, dtype=np.float32)
-    pitch_values = np.linspace(pitch_center - vertical_half, pitch_center + vertical_half, 24, dtype=np.float32)
-    yaw_grid, pitch_grid = np.meshgrid(yaw_values, pitch_values, indexing="xy")
-
     radius = config.enemy_max_range
-    x = enemy[0] + radius * np.cos(pitch_grid) * np.cos(yaw_grid)
-    y = enemy[1] + radius * np.cos(pitch_grid) * np.sin(yaw_grid)
-    z = enemy[2] + radius * np.sin(pitch_grid)
+    yaw_values = np.linspace(yaw_center - horizontal_half, yaw_center + horizontal_half, 72, dtype=np.float32)
+    fan_x = enemy[0] + radius * np.cos(yaw_values)
+    fan_y = enemy[1] + radius * np.sin(yaw_values)
+    fan_z = np.full_like(fan_x, 0.05)
 
-    z = np.clip(z, 0.0, config.height_levels)
-    ax.plot_surface(x, y, z, color="#ff6b6b", alpha=0.12, linewidth=0.0, shade=False)
+    poly_x = np.concatenate(([enemy[0]], fan_x, [enemy[0]]))
+    poly_y = np.concatenate(([enemy[1]], fan_y, [enemy[1]]))
+    poly_z = np.full_like(poly_x, 0.05)
+    ax.plot_trisurf(poly_x, poly_y, poly_z, color="#ff8a80", alpha=0.18, linewidth=0.0, shade=False)
 
-    edge_pitch = np.linspace(pitch_center - vertical_half, pitch_center + vertical_half, 36, dtype=np.float32)
-    for yaw in (yaw_center - horizontal_half, yaw_center + horizontal_half):
-        edge_x = enemy[0] + radius * np.cos(edge_pitch) * np.cos(yaw)
-        edge_y = enemy[1] + radius * np.cos(edge_pitch) * np.sin(yaw)
-        edge_z = np.clip(enemy[2] + radius * np.sin(edge_pitch), 0.0, config.height_levels)
-        ax.plot(edge_x, edge_y, edge_z, color="#e85d5d", alpha=0.55, linewidth=1.0)
-
-    edge_yaw = np.linspace(yaw_center - horizontal_half, yaw_center + horizontal_half, 48, dtype=np.float32)
-    for pitch in (pitch_center - vertical_half, pitch_center + vertical_half):
-        edge_x = enemy[0] + radius * np.cos(pitch) * np.cos(edge_yaw)
-        edge_y = enemy[1] + radius * np.cos(pitch) * np.sin(edge_yaw)
-        edge_z = np.clip(np.full_like(edge_x, enemy[2] + radius * np.sin(pitch)), 0.0, config.height_levels)
-        ax.plot(edge_x, edge_y, edge_z, color="#e85d5d", alpha=0.55, linewidth=1.0)
+    left_x = [enemy[0], enemy[0] + radius * np.cos(yaw_center - horizontal_half)]
+    left_y = [enemy[1], enemy[1] + radius * np.sin(yaw_center - horizontal_half)]
+    right_x = [enemy[0], enemy[0] + radius * np.cos(yaw_center + horizontal_half)]
+    right_y = [enemy[1], enemy[1] + radius * np.sin(yaw_center + horizontal_half)]
+    ax.plot(left_x, left_y, [0.06, 0.06], color="#e85d5d", alpha=0.75, linewidth=1.2)
+    ax.plot(right_x, right_y, [0.06, 0.06], color="#e85d5d", alpha=0.75, linewidth=1.2)
+    ax.plot(fan_x, fan_y, fan_z + 0.01, color="#e85d5d", alpha=0.65, linewidth=1.2)
 
 
 def _plot_reference_path(ax: plt.Axes, start: np.ndarray, goal: np.ndarray) -> None:

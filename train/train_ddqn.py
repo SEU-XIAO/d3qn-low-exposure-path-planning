@@ -61,9 +61,10 @@ def train(config: TrainingConfig | None = None) -> None:
             mean_loss = statistics.mean(episode_loss) if episode_loss else 0.0
             action_stats = agent.get_episode_stats()
             print(
-                f"Episode {episode:04d} | reward={episode_reward:7.3f} | "
-                f"mean20={mean_reward:7.3f} | loss={mean_loss:6.4f} | "
-                f"epsilon={agent.current_epsilon(global_step):5.3f} | scene_seed={train_scene_seed} | success={success} | "
+                f"Episode {episode:04d} | reward={episode_reward:7.3f} | mean20={mean_reward:7.3f} | "
+                f"loss={mean_loss:6.4f} | epsilon={agent.current_epsilon(global_step):5.3f} | "
+                f"path_len={env.total_path_length:6.3f} | hidden_ratio={env.hidden_ratio:5.3f} | "
+                f"scene_seed={train_scene_seed} | success={success} | "
                 f"greedy={action_stats['greedy']:03d} heuristic={action_stats['heuristic']:03d} "
                 f"teacher={action_stats['teacher']:03d} random={action_stats['random']:03d}"
             )
@@ -86,8 +87,8 @@ def train(config: TrainingConfig | None = None) -> None:
                     plateau_count = 0
                     agent.save(str(best_path))
                     print(
-                        f"[Best] success_rate={best_eval_success_rate:.2f} | "
-                        f"avg_reward={best_eval_reward:7.3f} | saved={best_path}"
+                        f"[Best] success_rate={best_eval_success_rate:.2f} | avg_reward={best_eval_reward:7.3f} | "
+                        f"avg_hidden_ratio={eval_summary['avg_hidden_ratio']:.3f} | saved={best_path}"
                     )
                 elif (
                     config.early_stop_enabled
@@ -121,6 +122,8 @@ def evaluate_policy(
     scenario_mode: str = "fixed",
 ) -> dict[str, float]:
     rewards: list[float] = []
+    hidden_ratios: list[float] = []
+    path_lengths: list[float] = []
     successes = 0
     seeds = tuple(scene_seeds) if scene_seeds is not None else tuple([None] * 3)
 
@@ -139,11 +142,23 @@ def evaluate_policy(
                 successes += 1
 
         rewards.append(episode_reward)
+        hidden_ratios.append(env.hidden_ratio)
+        path_lengths.append(env.total_path_length)
 
     avg_reward = statistics.mean(rewards) if rewards else 0.0
+    avg_hidden_ratio = statistics.mean(hidden_ratios) if hidden_ratios else 0.0
+    avg_path_length = statistics.mean(path_lengths) if path_lengths else 0.0
     success_rate = successes / max(1, len(seeds))
-    print(f"[Eval] avg_reward={avg_reward:7.3f} | success_rate={success_rate:.2f}")
-    return {"avg_reward": avg_reward, "success_rate": success_rate}
+    print(
+        f"[Eval] avg_reward={avg_reward:7.3f} | success_rate={success_rate:.2f} | "
+        f"avg_hidden_ratio={avg_hidden_ratio:.3f} | avg_path_len={avg_path_length:.3f}"
+    )
+    return {
+        "avg_reward": avg_reward,
+        "success_rate": success_rate,
+        "avg_hidden_ratio": avg_hidden_ratio,
+        "avg_path_length": avg_path_length,
+    }
 
 
 def _is_better_eval(
