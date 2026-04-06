@@ -10,7 +10,7 @@ from matplotlib.patches import Rectangle
 from env.battlefield_env import BattlefieldEnv
 from planner.visibility_astar import PathResult, VisibilityAwareAStarPlanner
 from train.dqn_agent import DoubleDQNAgent, TrainingConfig
-from visualize.plot_scene import draw_3d_scene
+from visualize.plot_scene import draw_3d_scene, _compute_fov_masks
 
 
 def plot_episode(
@@ -164,18 +164,31 @@ def _plot_path_3d(
 
 
 def _plot_topdown_scene(ax: plt.Axes, env: BattlefieldEnv, title: str) -> None:
-    visible = np.ma.masked_where(env.visibility_map <= 0, env.visibility_map)
+    visible_mask, occluded_mask = _compute_fov_masks(env)
+    visible = np.ma.masked_where(~visible_mask, env.visibility_map)
+    occluded = np.ma.masked_where(~occluded_mask, np.ones_like(env.visibility_map, dtype=np.float32))
     edge_values = np.arange(env.grid_size + 1, dtype=np.float32) - 0.5
+    ax.pcolormesh(
+        edge_values,
+        edge_values,
+        occluded.T,
+        cmap="Greys",
+        shading="flat",
+        alpha=0.22,
+        vmin=0.0,
+        vmax=1.0,
+        zorder=1,
+    )
     ax.pcolormesh(
         edge_values,
         edge_values,
         visible.T,
         cmap="Reds",
         shading="flat",
-        alpha=0.18,
+        alpha=0.32,
         vmin=0.0,
         vmax=1.0,
-        zorder=1,
+        zorder=2,
     )
 
     obstacle_cells = np.argwhere(env.height_map > 0)
@@ -200,6 +213,8 @@ def _plot_topdown_scene(ax: plt.Axes, env: BattlefieldEnv, title: str) -> None:
     ax.scatter(start[0], start[1], color="green", s=110, label="Start", zorder=5)
     ax.scatter(goal[0], goal[1], color="blue", s=110, label="Goal", zorder=5)
     ax.scatter(enemy[0], enemy[1], color="red", s=120, label="Enemy", zorder=5)
+    ax.scatter([], [], marker="s", s=80, color="#ff8a80", alpha=0.55, label="FOV Visible")
+    ax.scatter([], [], marker="s", s=80, color="#9aa0a6", alpha=0.5, label="FOV Occluded")
 
     ax.set_title(title)
     ax.set_xlabel("X")

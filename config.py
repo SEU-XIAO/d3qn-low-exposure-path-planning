@@ -3,42 +3,29 @@ from dataclasses import dataclass, field
 
 @dataclass(frozen=True)
 class EnvConfig:
-    # 栅格大小
     grid_size: int = 32
-    # 最大高度，没啥用，实际上是当一个二维平面来看的
-    height_levels: int = 8
-    # 智能体的视野范围大小
+    # Heights are only used for line-of-sight occlusion.
+    height_levels: int = 3
     local_map_size: int = 11
-    # 允许智能体走的最大的步数
     max_steps: int = 96
 
-    scenario_mode: str = "fixed"
-    # 敌人最大视野张角
+    scenario_mode: str = "random"
     enemy_horizontal_fov_deg: float = 70.0
-    # 敌人最大视野半径
     enemy_max_range: float = 24.0
-    # 敌人离目标最小距离
     enemy_goal_min_distance: float = 10.0
-    # 障碍物高度
-    obstacle_height: int = 5
 
-    obstacle_half_span: int = 3
-
-    random_obstacle_count_min: int = 5
-    random_obstacle_count_max: int = 9
-
-    random_obstacle_size_min: int = 2
-    random_obstacle_size_max: int = 6
+    # Each grid cell independently becomes an obstacle with this probability.
+    obstacle_probability: float = 0.06
 
     min_start_goal_distance: float = 18.0
-    train_scene_seeds: tuple[int, ...] = tuple(range(1000, 1100))
-    val_scene_seeds: tuple[int, ...] = tuple(range(2000, 2020))
-    test_scene_seeds: tuple[int, ...] = tuple(range(3000, 3020))
+    train_scene_seeds: tuple[int, ...] = tuple(range(1000, 4500))
+    val_scene_seeds: tuple[int, ...] = tuple(range(5000, 5020))
+    test_scene_seeds: tuple[int, ...] = tuple(range(6000, 6020))
     start: tuple[int, int] = (2, 2)
     goal: tuple[int, int] = (29, 29)
-    enemy_position: tuple[int, int] = (0, 16)
-    enemy_forward: tuple[float, float] = (1.0, 0.0)
-    
+    enemy_position: tuple[int, int] = (16, 31)
+    enemy_forward: tuple[float, float] = (0.0, -1)
+
     step_penalty: float = 0.08
     visible_penalty: float = 1.25
     progress_weight: float = 0.20
@@ -68,9 +55,10 @@ class ExplorationConfig:
 @dataclass(frozen=True)
 class TrainingDefaults:
     device: str = "cuda"
-    episodes: int = 3000
+    episodes: int = 10000
     batch_size: int = 256
-    replay_capacity: int = 50000
+    # 经验回放的大小一般在10w-100w之间
+    replay_capacity: int = 300000
     gamma: float = 0.99
     learning_rate: float = 3e-4
     target_update_interval: int = 500

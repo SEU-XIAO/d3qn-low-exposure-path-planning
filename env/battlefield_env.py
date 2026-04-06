@@ -157,12 +157,11 @@ class BattlefieldEnv:
     def _build_fixed_scene(self) -> None:
         self.height_map = np.zeros((self.grid_size, self.grid_size), dtype=np.int32)
         center = self.grid_size // 2
-        span = self.config.obstacle_half_span
 
-        self.height_map[center - span : center + span + 1, center - 1 : center + 2] = self.config.obstacle_height
-        self.height_map[center - 1 : center + 2, center - span : center + span + 1] = self.config.obstacle_height
-        self.height_map[center - 2 : center + 3, center + 4 : center + 6] = self.config.obstacle_height - 1
-        self.height_map[center - 5 : center - 3, center - 5 : center + 5] = self.config.obstacle_height - 2
+        self.height_map[center - 3 : center + 4, center - 1 : center + 2] = 2
+        self.height_map[center - 1 : center + 2, center - 3 : center + 4] = 2
+        self.height_map[center - 2 : center + 3, center + 4 : center + 6] = 1
+        self.height_map[center - 5 : center - 3, center - 5 : center + 5] = 1
 
         self.start_position = self.default_start.copy()
         self.goal_position = self.default_goal.copy()
@@ -190,24 +189,23 @@ class BattlefieldEnv:
         raise RuntimeError(f"无法为 scene_seed={scene_seed} 生成可达场景")
 
     def _place_random_obstacles(self, rng: np.random.Generator) -> None:
-        obstacle_count = int(rng.integers(self.config.random_obstacle_count_min, self.config.random_obstacle_count_max + 1))
-        for _ in range(obstacle_count):
-            width = int(rng.integers(self.config.random_obstacle_size_min, self.config.random_obstacle_size_max + 1))
-            height = int(rng.integers(self.config.random_obstacle_size_min, self.config.random_obstacle_size_max + 1))
-            x = int(rng.integers(2, self.grid_size - width - 2))
-            y = int(rng.integers(2, self.grid_size - height - 2))
-            obstacle_h = int(rng.integers(max(2, self.config.obstacle_height - 2), self.config.obstacle_height + 1))
-            self.height_map[x : x + width, y : y + height] = np.maximum(
-                self.height_map[x : x + width, y : y + height],
-                obstacle_h,
-            )
+        obstacle_mask = rng.random((self.grid_size, self.grid_size)) < self.config.obstacle_probability
+        obstacle_heights = rng.integers(1, 3, size=(self.grid_size, self.grid_size), dtype=np.int32)
+        self.height_map = np.where(obstacle_mask, obstacle_heights, 0).astype(np.int32)
 
     def _sample_start_goal(self, rng: np.random.Generator) -> tuple[tuple[int, int], tuple[int, int]]:
-        free_cells = self._free_cells()
+        corner_span = 3
+        start_candidates = self._free_cells_in_region(0, corner_span - 1, 0, corner_span - 1)
+        goal_start = max(0, self.grid_size - corner_span)
+        goal_candidates = self._free_cells_in_region(goal_start, self.grid_size - 1, goal_start, self.grid_size - 1)
         enemy_xy = self.default_enemy_xy.astype(np.float32)
+
+        if not start_candidates or not goal_candidates:
+            return tuple(self.config.start), tuple(self.config.goal)
+
         for _ in range(512):
-            start = free_cells[int(rng.integers(0, len(free_cells)))]
-            goal = free_cells[int(rng.integers(0, len(free_cells)))]
+            start = start_candidates[int(rng.integers(0, len(start_candidates)))]
+            goal = goal_candidates[int(rng.integers(0, len(goal_candidates)))]
             if start == goal:
                 continue
             if np.linalg.norm(np.array(start, dtype=np.float32) - np.array(goal, dtype=np.float32)) < self.config.min_start_goal_distance:
@@ -215,6 +213,17 @@ class BattlefieldEnv:
             if np.linalg.norm(np.array(goal, dtype=np.float32) - enemy_xy) < self.config.enemy_goal_min_distance:
                 continue
             return start, goal
+
+        # Relax only the start-goal distance if the sampled map is too restrictive.
+        for _ in range(256):
+            start = start_candidates[int(rng.integers(0, len(start_candidates)))]
+            goal = goal_candidates[int(rng.integers(0, len(goal_candidates)))]
+            if start == goal:
+                continue
+            if np.linalg.norm(np.array(goal, dtype=np.float32) - enemy_xy) < self.config.enemy_goal_min_distance:
+                continue
+            return start, goal
+
         return tuple(self.config.start), tuple(self.config.goal)
 
     def _free_cells(self) -> list[tuple[int, int]]:
@@ -225,19 +234,35 @@ class BattlefieldEnv:
                     cells.append((x, y))
         return cells
 
+    def _free_cells_in_region(self, x_min: int, x_max: int, y_min: int, y_max: int) -> list[tuple[int, int]]:
+        cells: list[tuple[int, int]] = []
+        x0 = max(0, x_min)
+        x1 = min(self.grid_size - 1, x_max)
+        y0 = max(0, y_min)
+        y1 = min(self.grid_size - 1, y_max)
+        for x in range(x0, x1 + 1):
+            for y in range(y0, y1 + 1):
+                if self.height_map[x, y] == 0:
+                    cells.append((x, y))
+        return cells
+
     def _sample_enemy_forward(self, enemy_xy: np.ndarray) -> np.ndarray:
         center = np.array((self.grid_size / 2.0, self.grid_size / 2.0), dtype=np.float32)
         return center - enemy_xy.astype(np.float32)
 
     def _finalize_scene_maps(self) -> None:
         self.occupancy_map = (self.height_map > 0).astype(np.float32)
+        self._enforce_start_goal_free_cells()
+        self.visibility_map = np.zeros((self.grid_size, self.grid_size), dtype=np.float32)
+        self.cover_map = np.ones((self.grid_size, self.grid_size), dtype=np.float32)
+        self._recompute_visibility_map()
+
+    def _enforce_start_goal_free_cells(self) -> None:
+        # Hard constraint: start and goal must always be traversable cells.
         self.height_map[tuple(self.start_position)] = 0
         self.height_map[tuple(self.goal_position)] = 0
         self.occupancy_map[tuple(self.start_position)] = 0.0
         self.occupancy_map[tuple(self.goal_position)] = 0.0
-        self.visibility_map = np.zeros((self.grid_size, self.grid_size), dtype=np.float32)
-        self.cover_map = np.ones((self.grid_size, self.grid_size), dtype=np.float32)
-        self._recompute_visibility_map()
 
     def _has_feasible_path(self) -> bool:
         start = tuple(self.start_position.tolist())
