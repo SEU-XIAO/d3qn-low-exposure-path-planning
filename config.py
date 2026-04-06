@@ -6,7 +6,7 @@ class EnvConfig:
     grid_size: int = 32
     # Heights are only used for line-of-sight occlusion.
     height_levels: int = 3
-    local_map_size: int = 11
+    local_map_size: int = 32
     max_steps: int = 96
 
     scenario_mode: str = "random"
@@ -37,7 +37,7 @@ class EnvConfig:
 
 @dataclass(frozen=True)
 class ModelConfig:
-    local_channels: int = 4
+    local_channels: int = 3
     global_feature_dim: int = 10
     action_dim: int = 8
 

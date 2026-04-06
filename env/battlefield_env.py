@@ -287,7 +287,6 @@ class BattlefieldEnv:
     def _extract_local_map(self) -> np.ndarray:
         radius = self.config.local_map_size // 2
         padded_occ = np.pad(self.occupancy_map, radius, mode="constant", constant_values=1.0)
-        padded_height = np.pad(self.height_map.astype(np.float32), radius, mode="constant")
         padded_visibility = np.pad(self.visibility_map, radius, mode="constant")
         padded_goal = np.pad(np.zeros_like(self.occupancy_map, dtype=np.float32), radius, mode="constant")
 
@@ -302,11 +301,10 @@ class BattlefieldEnv:
         ys = slice(ay - radius, ay + radius + 1)
 
         local_occ = padded_occ[xs, ys]
-        local_height = padded_height[xs, ys] / max(1, self.height_levels - 1)
         local_visibility = padded_visibility[xs, ys]
         local_goal = padded_goal[xs, ys]
 
-        return np.stack((local_occ, local_height, local_visibility, local_goal), axis=0).astype(np.float32)
+        return np.stack((local_occ, local_visibility, local_goal), axis=0).astype(np.float32)
 
     def _build_global_features(self) -> np.ndarray:
         relative_goal = (self.goal_position - self.agent_position).astype(np.float32) / self.grid_size
