@@ -61,7 +61,7 @@ def _collect_dqn_path(
 
     while not done:
         observation = env.get_observation()
-        action = agent.select_action(observation, epsilon=0.0, env=env)
+        action = agent.select_action_masked(observation, env=env)
         result = env.step(action)
         path_cells.append(tuple(env.agent_position.tolist()))
         done = result.done

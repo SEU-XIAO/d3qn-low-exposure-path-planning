@@ -1,209 +1,89 @@
-# 项目运行说明
+# 项目说明（对齐当前实现）
 
-## 项目概览
+## 1. 目标与指标
 
-当前版本已经切换到“短路径 + 高隐蔽比例”的目标，核心能力包括：
+本项目关注在敌方视野约束下的路径规划问题，目标是：
+- 路径尽量短
+- 路径尽量隐蔽（尽量少暴露在敌方视野内）
 
-- `32 x 32 x 8` 三维栅格战场环境
-- 二维地面移动 + 障碍物遮挡敌方视线
-- 固定场景与随机场景两种模式
-- `D3QN` 智能体
-- `epsilon-greedy + heuristic action subset` 探索
-- 可选 `Visibility-A* teacher action`
-- `Visibility-A*` 基线规划
-- D3QN 与 `Visibility-A*` 的 3D/俯视图对比
-- 评估驱动的 `best` 保存、early stop、中断保存
+环境会统计以下指标：
+`total_path_length`、`visible_path_length`、`hidden_path_length`、`hidden_ratio`、`visible_ratio`。
 
-## 训练与泛化机制
+## 2. 环境与场景
 
-当前训练默认使用“训练随机化、验证固定种子集”的方式：
+- 地图尺寸：`32 x 32`，高度层级仅用于遮挡视线（不参与运动维度）。
+- 智能体在二维平面离散移动（8 邻域）。
+- 障碍生成：每个格子以 `obstacle_probability` 概率成为障碍；高度只取 1 或 2。
+- 敌人具有位置、朝向、视场角与最大可见距离。
+- 支持固定场景与随机场景（训练默认随机）。
 
-- 训练时：
-  每个 episode 会从 [config.py](/d:/井九/Documents/大三寒假/temp/config.py) 的 `train_scene_seeds` 中随机采样一个 `scene_seed`，并以 `scenario_mode="random"` 生成场景
-- 验证时：
-  使用 `val_scene_seeds` 中的一组未见过的固定随机场景
-- 测试时：
-  可使用 `test_scene_seeds` 做泛化测试
+核心环境代码：`env/battlefield_env.py`
 
-这样做的目标是：
+## 3. 可见性建模
 
-- 不让模型只记住单一地图
-- 让评估更接近真实泛化能力
-- 让训练日志中的 `scene_seed` 可以被本地完整复现
+`visibility_map[x, y]` 表示该格是否被敌人看见：
+1 表示可见，0 表示不可见。可见性由以下条件决定：
+- 非障碍
+- 在敌人最大可见距离内
+- 在敌人水平视场角内
+- 视线未被障碍遮挡
 
-## 默认训练参数
+## 4. 智能体与输入设计
 
-当前默认配置位于 [config.py](/d:/井九/Documents/大三寒假/temp/config.py)：
+模型使用 D3QN（Double DQN + Dueling Network）。
 
-- `device = "cuda"`，无 CUDA 时自动回退 CPU
-- `episodes = 3000`
-- `batch_size = 256`
-- `replay_capacity = 50000`
-- `learning_rate = 3e-4`
-- `warmup_steps = 2000`
-- `epsilon_decay_steps = 20000`
-- `eval_interval = 50`
-- `save_interval = 100`
+### 4.1 局部/全局观测
 
-与当前目标直接相关的环境参数包括：
+`local_map`（4 通道）：
+- `occupancy`：障碍占据
+- `visibility`：可见性
+- `goal`：目标位置
+- `agent`：智能体当前位置
 
-- `step_penalty`
-- `visible_penalty`
-- `progress_weight`
-- `hidden_ratio_gain_weight`
-- `success_hidden_ratio_weight`
+当 `local_map_size == grid_size` 时，`local_map` 即为全图。
 
-## 快速开始
+`global_features`（10 维）：
+相对目标、相对敌人、目标/敌人距离、敌人朝向、当前位置可见性、`hidden_ratio`。
 
-安装依赖：
+### 4.2 动作空间
 
-```bash
-pip install -r requirements.txt
-```
+8 个离散动作（上下左右 + 4 个对角方向），动作维度由环境 `BattlefieldEnv.ACTIONS` 决定。
 
-检查环境和网络前向输出：
+### 4.3 动作掩码
 
-```bash
-python main.py
-```
+训练与推理均对无效动作进行掩码，避免撞墙动作影响策略与目标估计。
 
-启动训练：
+## 5. 奖励设计（核心逻辑）
 
-```bash
-python -m train.train_ddqn
-```
+奖励由以下部分组成：
+- 步长惩罚
+- 暴露惩罚
+- 朝目标前进奖励
+- 隐蔽比例提升奖励
+- 达到目标奖励
+- 撞墙惩罚
 
-## 模型文件
+## 6. 训练与评估
 
-训练过程会在 `artifacts/` 目录下生成：
+训练默认使用随机场景：
+`train_scene_seeds` / `val_scene_seeds` / `test_scene_seeds`。
 
-- `ddqn_latest.pt`：最近一次保存的模型
-- `ddqn_best.pt`：验证集表现最好的模型
-- `ddqn_interrupt.pt`：训练被手动中断时保存的模型
+训练机制包含：
+`best model` 保存、定期评估、early stop、中断保存。
 
-实际评估和可视化时，建议优先使用 `ddqn_best.pt`。
+## 7. 关键默认配置（见 `config.py`）
 
-## 复现场景
+- `episodes = 10000`
+- `replay_capacity = 300000`
+- `epsilon_decay_steps = 100000`
+- `early_stop_eval_episodes = 10`
+- `early_stop_success_rate_threshold = 0.6`
 
-如果训练日志里打印出了某个 `scene_seed`，就可以在本地复现同一个随机场景。
+## 8. 可视化与对比
 
-例如日志里出现：
+支持 3D 与俯视图展示，并与 `Visibility-A*` 进行路径对比。
 
-```text
-scene_seed=2003
-```
-
-那么可以在本地用同样的 `scene_seed` 做评估和可视化。
-
-## 常用运行命令
-
-查看固定场景的 3D 布局：
-
-```bash
-python -m visualize.plot_scene
-```
-
-在 Python 中查看指定随机场景：
-
-```python
-from visualize.plot_scene import plot_scene
-
-plot_scene(scene_seed=2003, scenario_mode="random")
-```
-
-打印模型在指定场景下的一回合决策过程：
-
-```python
-from eval.run_policy import run_episode
-
-run_episode(checkpoint_name="ddqn_best.pt", scene_seed=2003, scenario_mode="random")
-```
-
-绘制模型在指定场景下的路径：
-
-```python
-from visualize.plot_episode import plot_episode
-
-plot_episode(checkpoint_name="ddqn_best.pt", scene_seed=2003, scenario_mode="random")
-```
-
-绘制 D3QN 与 `Visibility-A*` 的路径对比：
-
-```python
-from visualize.plot_episode import plot_comparison
-
-plot_comparison(checkpoint_name="ddqn_best.pt", scene_seed=2003, scenario_mode="random")
-```
-
-直接运行评估脚本默认示例：
-
-```bash
-python -m eval.run_policy
-```
-
-直接运行路径对比可视化默认示例：
-
-```bash
-python -m visualize.plot_episode
-```
-
-## 推荐工作流
-
-建议后续按下面流程使用：
-
-1. 本地修改代码并提交
-2. 训练模型
-3. 关注训练日志中的 `Eval` 指标和 `scene_seed`
-4. 如果某个 seed 表现异常，在本地直接复现该场景
-5. 用 `run_policy` 和可视化检查路径是否真的“短且隐蔽”
-6. 优先使用 `ddqn_best.pt` 继续分析
-
-## 评估时建议关注什么
-
-不建议只看 `success_rate`。
-
-当前更应该同时看：
-
-- 是否成功到达终点
-- 路径长度 `path_length`
-- 隐蔽比例 `hidden_ratio`
-- 可见路径长度 `visible_path_length`
-- 3D/俯视图可视化效果
-- 与 `Visibility-A*` 的差距
-
-## 当前主要入口文件
-
-- [main.py](/d:/井九/Documents/大三寒假/temp/main.py)：环境与网络前向检查
-- [train/train_ddqn.py](/d:/井九/Documents/大三寒假/temp/train/train_ddqn.py)：训练入口
-- [eval/run_policy.py](/d:/井九/Documents/大三寒假/temp/eval/run_policy.py)：单场景评估与对比
-- [visualize/plot_scene.py](/d:/井九/Documents/大三寒假/temp/visualize/plot_scene.py)：场景可视化
-- [visualize/plot_episode.py](/d:/井九/Documents/大三寒假/temp/visualize/plot_episode.py)：路径与路径对比可视化
-
-## 关于随机化场景
-
-当前这轮重构**没有改动随机场景生成机制本身**，随机化逻辑仍然沿用原来的设计，主要还是：
-
-- 随机障碍数量
-- 随机障碍尺寸
-- 随机障碍位置
-- 随机障碍高度
-- 随机起点
-- 随机终点
-- 敌人朝向仍然按原有逻辑朝向地图中心方向生成
-
-我这次主要改的是：
-
-- 奖励函数
-- 环境反馈字段
-- 可见性地图
-- 基线规划器
-- 训练/评估/可视化指标
-
-没有去改：
-
-- `train_scene_seeds / val_scene_seeds / test_scene_seeds`
-- 随机场景生成的采样流程
-- 障碍采样范围
-- 起终点采样约束
-
-如果你下一步想继续增强随机化场景，比如让敌人位置、敌人朝向、视场角、障碍形状也一起随机，我可以再继续帮你改这一层。
+相关脚本：
+- `visualize/plot_scene.py`
+- `visualize/plot_episode.py`
+- `eval/run_policy.py`

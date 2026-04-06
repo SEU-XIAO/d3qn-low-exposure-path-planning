@@ -47,7 +47,7 @@ def _run_dqn_episode(
 
     print(f"加载 D3QN 模型: {checkpoint_path}")
     while not done:
-        action = agent.select_action(observation, epsilon=0.0, env=env)
+        action = agent.select_action_masked(observation, env=env)
         result = env.step(action)
         observation = result.observation
         total_reward += result.reward

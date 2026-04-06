@@ -141,7 +141,7 @@ def evaluate_policy(
         episode_reward = 0.0
 
         while not done:
-            action = agent.select_action(observation, epsilon=0.0, env=env)
+            action = agent.select_action_masked(observation, env=env)
             result = env.step(action)
             observation = result.observation
             episode_reward += result.reward

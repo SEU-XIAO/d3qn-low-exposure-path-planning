@@ -1,206 +1,63 @@
-# 基于三维栅格战场环境的隐蔽路径规划项目说明
-
-## 1. 项目目标
-
-本项目研究的是一个受敌方视野约束的路径规划问题。
-
-给定起点、终点、障碍物分布以及敌方位置与朝向，智能体需要在二维地面网格中移动，从起点到终点，同时满足两个核心目标：
-
-- 路径尽量短
-- 路径尽量多地处在敌人看不见的遮挡区域内
-
-也就是说，本项目当前不再以旧版“风险值最小化”为主目标，而是显式围绕以下路径级指标训练：
-
-- 总路径长度
-- 可见路径长度
-- 隐蔽路径长度
-- 路径隐蔽比例 `hidden_ratio`
-
-其中：
-
-- `visible_path_length` 表示路径中暴露在敌人视野中的部分长度
-- `hidden_path_length` 表示路径中处于遮挡或视野外的部分长度
-- `hidden_ratio = hidden_path_length / total_path_length`
-
-## 2. 环境建模
-
-项目环境采用三维栅格战场建模，但智能体动作仍然简化为二维平面上的离散移动。
-
-当前环境的主要设定如下：
-
-- 地图大小：`32 x 32 x 8`
-- 智能体在二维地面网格上移动
-- 障碍物具有高度信息，并用于阻塞移动和遮挡敌人视线
-- 敌人具有固定位置、朝向、最大探测距离和水平视场角
-- 场景支持固定模式和随机生成模式
-
-环境核心代码位于 [env/battlefield_env.py](/d:/井九/Documents/大三寒假/temp/env/battlefield_env.py)。
-
-## 3. 当前可见性建模
-
-### 3.1 可见性判定
-
-项目当前使用 `visibility_map` 表示格子是否会被敌人看到：
-
-- `visibility_map[x, y] = 1.0`：该格子可见
-- `visibility_map[x, y] = 0.0`：该格子不可见
-
-一个格子被判定为“可见”需要同时满足：
-
-- 该格子不是障碍物
-- 在敌人最大探测距离内
-- 位于敌人水平视场角内
-- 敌人到该格子的视线没有被障碍物遮挡
-
-一旦任一条件不满足，该格子就记为不可见。
-
-### 3.2 障碍物作用
-
-当前障碍物承担两个作用：
-
-- 作为不可通行区域
-- 作为视线遮挡体
-
-因此，障碍物本身不再参与“风险值计算”，而是通过阻塞移动和遮挡视线影响路径规划。
-
-### 3.3 路径级隐蔽性统计
-
-环境在 episode 内持续维护：
-
-- `total_path_length`
-- `visible_path_length`
-- `hidden_path_length`
-- `hidden_ratio`
-- `visible_ratio`
-
-这些量既参与奖励设计，也用于训练日志、评估和可视化输出。
-
-## 4. 智能体设计
-
-### 4.1 总体结构
-
-当前智能体使用 `D3QN` 架构，即：
-
-- `Double DQN`
-- `Dueling Network`
-
-对应核心实现位于：
-
-- [train/dqn_agent.py](/d:/井九/Documents/大三寒假/temp/train/dqn_agent.py)
-- [models/policy_network.py](/d:/井九/Documents/大三寒假/temp/models/policy_network.py)
-
-### 4.2 输入设计
-
-当前观测由“局部地图 + 全局特征”组成。
-
-局部输入 `local_map` 共有 4 个通道：
-
-- 占据通道 `occupancy`
-- 高度通道 `height`
-- 可见性通道 `visibility`
-- 目标通道 `goal`
-
-全局输入 `global_features` 当前包含：
-
-- 智能体到目标的相对位置
-- 智能体到敌人的相对位置
-- 当前到目标距离
-- 当前到敌人距离
-- 敌人朝向
-- 当前格子的可见性
-- 当前路径隐蔽比例 `hidden_ratio`
-
-### 4.3 动作空间
-
-当前动作空间是 8 个离散动作：
-
-- 上
-- 下
-- 左
-- 右
-- 左上
-- 左下
-- 右上
-- 右下
-
-## 5. 奖励设计
-
-当前奖励函数围绕“短路径 + 高隐蔽比例”设计。
-
-每一步主要由以下部分组成：
-
-- 步长惩罚
-- 可见惩罚
-- 朝目标推进奖励
-- 隐蔽比例提升奖励
-- 到达目标奖励
-- 碰撞惩罚
-
-整体思路是：
-
-- 鼓励智能体尽快接近目标
-- 惩罚经过敌人可见区域的路径长度
-- 鼓励整条路径的 `hidden_ratio` 提升
-- 避免原地绕圈和无意义迂回
-
-## 6. 基线方法
-
-为了和学习方法做对比，项目当前实现了 `Visibility-A*` 作为传统基线。
-
-对应代码位于 [planner/visibility_astar.py](/d:/井九/Documents/大三寒假/temp/planner/visibility_astar.py)。
-
-该基线的代价函数围绕以下目标构造：
-
-- 路径长度尽量短
-- 经过可见区域的路径长度尽量少
-
-也就是说，它不再使用旧版 `Risk-A*` 的风险代价，而是直接以“长度 + 可见路径代价”为优化目标。
-
-## 7. 训练与验证机制
-
-### 7.1 随机场景训练
-
-训练默认使用随机场景：
-
-- 训练时从 `train_scene_seeds` 中随机采样一个 `scene_seed`
-- 验证时使用 `val_scene_seeds`
-- 测试时可使用 `test_scene_seeds`
-
-这些种子定义在 [config.py](/d:/井九/Documents/大三寒假/temp/config.py)。
-
-当前默认数量为：
-
-- 训练种子 100 个：`1000 ~ 1099`
-- 验证种子 20 个：`2000 ~ 2019`
-- 测试种子 20 个：`3000 ~ 3019`
-
-### 7.2 训练稳定机制
-
-项目当前保留了以下训练工程机制：
-
-- `best model` 保存
-- 定期评估
-- early stop
-- 中断保存
-
-评估时重点关注：
-
-- `success_rate`
-- `avg_reward`
-- `avg_hidden_ratio`
-- `avg_path_length`
-
-## 8. 项目特点总结
-核心特点可以概括为：
-
-- 使用三维障碍建模来保留遮挡效果
-- 使用二维离散动作降低训练复杂度
-- 使用 `visibility_map` 代替旧的经验风险图
-- 使用 `hidden_ratio` 作为路径级隐蔽性指标
-- 使用 `D3QN` 学习短而隐蔽的路径
-- 使用 `Visibility-A*` 作为传统可解释基线
-- 使用随机种子生成场景来验证泛化能力
-
-
-
-![alt text](image.png)
+# 项目运行说明
+
+## 项目概览
+
+本项目用于在敌方视野约束下学习“短且隐蔽”的路径。环境为二维栅格移动，但障碍高度仅用于视线遮挡计算。当前默认使用随机场景训练，且每个 episode 都会重新采样场景。
+
+核心要点：
+- 地图大小：`32 x 32`，高度层级仅用于遮挡计算。
+- 障碍生成：每个格子以 `obstacle_probability` 的概率成为障碍（伯努利采样）。
+- 观测输入：`local_map` + `global_features`。
+- 算法：`D3QN`（Double DQN + Dueling Network）。
+- 动作掩码：训练与推理都对无效动作做掩码，避免撞墙动作干扰。
+
+## 训练与泛化机制
+
+- 训练时从 `train_scene_seeds` 中随机采样 `scene_seed`。
+- 验证与测试使用固定种子集合。
+- 训练过程中会保存 `latest/best/interrupt` 模型。
+
+## 默认训练参数（见 `config.py`）
+
+- `episodes = 10000`
+- `batch_size = 256`
+- `replay_capacity = 300000`
+- `learning_rate = 3e-4`
+- `warmup_steps = 2000`
+- `epsilon_decay_steps = 100000`
+- `eval_interval = 50`
+- `save_interval = 100`
+
+## 快速开始
+
+安装依赖：
+```bash
+pip install -r requirements.txt
+```
+
+检查环境与网络输出：
+```bash
+python main.py
+```
+
+启动训练：
+```bash
+python -m train.train_ddqn
+```
+
+## 常用可视化与评估
+
+查看随机场景 3D + 俯视图：
+```bash
+python -m visualize.plot_scene
+```
+
+评估并对比 D3QN 与 Visibility-A*：
+```bash
+python -m eval.run_policy
+```
+
+绘制路径对比图：
+```bash
+python -m visualize.plot_episode
+```

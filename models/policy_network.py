@@ -21,7 +21,7 @@ class HybridPolicyNetwork(nn.Module):
             nn.MaxPool2d(kernel_size=2),
             nn.Conv2d(32, 64, kernel_size=3, padding=1),
             nn.ReLU(),
-            nn.AdaptiveAvgPool2d((2, 2)),
+            nn.AdaptiveAvgPool2d((4, 4)),
             nn.Flatten(),
         )
 
@@ -33,7 +33,7 @@ class HybridPolicyNetwork(nn.Module):
         )
 
         self.fusion = nn.Sequential(
-            nn.Linear(64 * 4 + 64, 128),
+            nn.Linear(64 * 16 + 64, 128),
             nn.ReLU(),
         )
 

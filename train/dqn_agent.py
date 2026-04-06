@@ -91,6 +91,16 @@ class DoubleDQNAgent:
         self.episode_action_stats["greedy"] += 1
         return int(torch.argmax(q_values, dim=1).item())
 
+    def select_action_masked(self, observation: dict[str, np.ndarray], env: BattlefieldEnv) -> int:
+        self.online_net.eval()
+        with torch.no_grad():
+            local_map = torch.from_numpy(observation["local_map"]).unsqueeze(0).float().to(self.device)
+            global_features = torch.from_numpy(observation["global_features"]).unsqueeze(0).float().to(self.device)
+            q_values = self.online_net(local_map, global_features)
+        valid_actions = env.get_valid_actions()
+        q_values = self._mask_invalid_actions(q_values, valid_actions)
+        return int(torch.argmax(q_values, dim=1).item())
+
     def _select_guided_exploration_action(self, env: BattlefieldEnv | None, global_step: int) -> tuple[int | None, str]:
         if env is None:
             return None, "random"
@@ -208,10 +218,14 @@ class DoubleDQNAgent:
 
         with torch.no_grad():
             next_online_q = self.online_net(next_local_map, next_global_features)
-            if "next_valid_action_mask" in batch:
-                next_online_q = self._mask_invalid_actions(next_online_q, batch["next_valid_action_mask"])
+            next_valid_mask = batch.get("next_valid_action_mask")
+            if next_valid_mask is not None:
+                next_online_q = self._mask_invalid_actions(next_online_q, next_valid_mask)
             next_actions = torch.argmax(next_online_q, dim=1, keepdim=True)
-            next_target_q = self.target_net(next_local_map, next_global_features).gather(1, next_actions).squeeze(1)
+            next_target_q_full = self.target_net(next_local_map, next_global_features)
+            if next_valid_mask is not None:
+                next_target_q_full = self._mask_invalid_actions(next_target_q_full, next_valid_mask)
+            next_target_q = next_target_q_full.gather(1, next_actions).squeeze(1)
             td_target = rewards + self.config.gamma * next_target_q * (1.0 - dones)
 
         loss = self.loss_fn(current_q, td_target)
