@@ -9,6 +9,7 @@ from matplotlib.patches import Rectangle
 
 from env.battlefield_env import BattlefieldEnv
 from planner.visibility_astar import PathResult, VisibilityAwareAStarPlanner
+from planner.pareto_astar import ParetoVisibilityAStarPlanner, ParetoFrontResult
 from train.dqn_agent import DoubleDQNAgent, TrainingConfig
 from visualize.plot_scene import draw_3d_scene, _compute_fov_masks
 
@@ -31,12 +32,14 @@ def plot_comparison(
     scenario_mode: str = "fixed",
 ) -> None:
     dqn_summary, env = _collect_dqn_path(checkpoint_name, scene_seed=scene_seed, scenario_mode=scenario_mode)
-    astar_result = VisibilityAwareAStarPlanner(env).plan(
+    pareto_front = ParetoVisibilityAStarPlanner(env).plan(
         start=tuple(env.start_position.tolist()),
         goal=tuple(env.goal_position.tolist()),
+        max_solutions=6,
     )
-    title = _build_comparison_title(env, dqn_summary, astar_result)
-    _render_comparison_3d(env, dqn_summary, astar_result, title, save_path)
+    pareto_result = _select_pareto_path(env, pareto_front)
+    title = _build_comparison_title(env, dqn_summary, pareto_result)
+    _render_comparison_3d(env, dqn_summary, pareto_result, title, save_path)
 
 
 def _collect_dqn_path(
@@ -117,24 +120,24 @@ def _render_single_path_3d(
 def _render_comparison_3d(
     env: BattlefieldEnv,
     dqn_summary: dict[str, Any],
-    astar_result: PathResult,
+    pareto_result: PathResult,
     title: str,
     save_path: str | None,
 ) -> None:
-    fig = plt.figure(figsize=(17, 8.8))
-    ax_3d = fig.add_subplot(1, 2, 1, projection="3d")
+    fig = plt.figure(figsize=(14.8, 7.6))
+    ax_left = fig.add_subplot(1, 2, 1)
     ax_top = fig.add_subplot(1, 2, 2)
 
-    draw_3d_scene(ax_3d, env)
-    _plot_path_3d(ax_3d, dqn_summary["path"], color="#1f77b4", label="D3QN", z_offset=0.18, linestyle="-")
-    _annotate_status(ax_3d, dqn_summary, astar_result)
-    ax_3d.set_title(title)
+    _plot_topdown_scene(ax_left, env, title="")
+    _plot_path_topdown(ax_left, pareto_result.path, color="#ff9f1c", label="Pareto A*", linestyle="-")
+    _annotate_status(ax_left, dqn_summary, pareto_result)
 
     _plot_topdown_scene(ax_top, env, title="Top-Down Path Comparison")
     _plot_path_topdown(ax_top, dqn_summary["path"], color="#1f77b4", label="D3QN", linestyle="-")
 
-    fig.subplots_adjust(right=0.82)
-    _add_shared_legend(fig, [ax_3d, ax_top])
+    fig.suptitle(title, x=0.5, y=0.98)
+    fig.subplots_adjust(left=0.04, right=0.88, bottom=0.06, top=0.92, wspace=0.06)
+    _add_shared_legend(fig, [ax_left, ax_top])
 
     if save_path:
         plt.savefig(save_path, dpi=180, bbox_inches="tight")
@@ -245,17 +248,36 @@ def _build_title(prefix: str, env: BattlefieldEnv) -> str:
     return f"{prefix} | fixed scene"
 
 
+def _select_pareto_path(env: BattlefieldEnv, pareto: ParetoFrontResult) -> PathResult:
+    if not pareto.paths:
+        start = tuple(env.start_position.tolist())
+        return PathResult(
+            path=[start],
+            total_cost=float("inf"),
+            path_length=0.0,
+            visible_path_length=0.0,
+            hidden_path_length=0.0,
+            hidden_ratio=1.0,
+            steps=0,
+            success=False,
+        )
+    return min(
+        pareto.paths,
+        key=lambda r: (r.path_length, -r.hidden_ratio),
+    )
+
+
 def _build_single_title(env: BattlefieldEnv, dqn_summary: dict[str, Any]) -> str:
     title = _build_title("3D D3QN Episode Path", env)
     return f"{title} | success={dqn_summary['success']} | hidden_ratio={dqn_summary['hidden_ratio']:.3f}"
 
 
-def _build_comparison_title(env: BattlefieldEnv, dqn_summary: dict[str, Any], astar_result: PathResult) -> str:
-    title = _build_title("3D D3QN vs Visibility-A* Path Comparison", env)
-    return f"{title} | D3QN={dqn_summary['success']} | Visibility-A*={astar_result.success}"
+def _build_comparison_title(env: BattlefieldEnv, dqn_summary: dict[str, Any], pareto_result: PathResult) -> str:
+    title = _build_title("Pareto-A* vs D3QN Top-Down Comparison", env)
+    return f"{title} | Pareto-A*={pareto_result.success} | D3QN={dqn_summary['success']}"
 
 
-def _annotate_status(ax: plt.Axes, dqn_summary: dict[str, Any], astar_result: PathResult | None) -> None:
+def _annotate_status(ax: plt.Axes, dqn_summary: dict[str, Any], pareto_result: PathResult | None) -> None:
     lines = [
         f"D3QN success={dqn_summary['success']}",
         f"D3QN final={dqn_summary['final_position']}",
@@ -265,15 +287,15 @@ def _annotate_status(ax: plt.Axes, dqn_summary: dict[str, Any], astar_result: Pa
         f"D3QN final_visible={dqn_summary['final_visibility']:.0f}",
     ]
 
-    if astar_result is not None:
-        lines.append(f"Visibility-A* success={astar_result.success}")
-        lines.append(f"Visibility-A* steps={astar_result.steps}")
-        lines.append(f"Visibility-A* hidden_ratio={astar_result.hidden_ratio:.3f}")
-        lines.append(f"Visibility-A* final={astar_result.path[-1]}")
-        if not astar_result.success:
-            lines.append("Visibility-A* failed to find a full path")
+    if pareto_result is not None:
+        lines.append(f"Pareto-A* success={pareto_result.success}")
+        lines.append(f"Pareto-A* steps={pareto_result.steps}")
+        lines.append(f"Pareto-A* hidden_ratio={pareto_result.hidden_ratio:.3f}")
+        lines.append(f"Pareto-A* final={pareto_result.path[-1]}")
+        if not pareto_result.success:
+            lines.append("Pareto-A* failed to find a full path")
 
-    ax.text2D(
+    ax.text(
         0.02,
         0.98,
         "\n".join(lines),
