@@ -50,14 +50,14 @@ class DoubleDQNAgent:
         self.action_dim = action_dim
         self.exploration = self.config.exploration
 
-        self.online_net = HybridPolicyNetwork().to(self.device)
-        self.target_net = HybridPolicyNetwork().to(self.device)
+        self.online_net = HybridPolicyNetwork(action_dim=self.action_dim).to(self.device)
+        self.target_net = HybridPolicyNetwork(action_dim=self.action_dim).to(self.device)
         self.target_net.load_state_dict(self.online_net.state_dict())
         self.target_net.eval()
 
         self.optimizer = torch.optim.Adam(self.online_net.parameters(), lr=self.config.learning_rate)
         self.loss_fn = nn.SmoothL1Loss()
-        self.replay_buffer = ReplayBuffer(self.config.replay_capacity)
+        self.replay_buffer = ReplayBuffer(self.config.replay_capacity, self.action_dim)
         self.training_steps = 0
         self.last_loss = 0.0
         self.episode_action_stats = {
@@ -85,6 +85,9 @@ class DoubleDQNAgent:
             local_map = torch.from_numpy(observation["local_map"]).unsqueeze(0).float().to(self.device)
             global_features = torch.from_numpy(observation["global_features"]).unsqueeze(0).float().to(self.device)
             q_values = self.online_net(local_map, global_features)
+        if env is not None:
+            valid_actions = env.get_valid_actions()
+            q_values = self._mask_invalid_actions(q_values, valid_actions)
         self.episode_action_stats["greedy"] += 1
         return int(torch.argmax(q_values, dim=1).item())
 
@@ -174,6 +177,7 @@ class DoubleDQNAgent:
         reward: float,
         next_observation: dict[str, np.ndarray],
         done: bool,
+        next_valid_actions: list[int] | None = None,
     ) -> None:
         self.replay_buffer.add(
             local_map=observation["local_map"],
@@ -183,6 +187,7 @@ class DoubleDQNAgent:
             next_local_map=next_observation["local_map"],
             next_global_features=next_observation["global_features"],
             done=done,
+            next_valid_actions=next_valid_actions,
         )
 
     def can_train(self, batch_size: int) -> bool:
@@ -203,6 +208,8 @@ class DoubleDQNAgent:
 
         with torch.no_grad():
             next_online_q = self.online_net(next_local_map, next_global_features)
+            if "next_valid_action_mask" in batch:
+                next_online_q = self._mask_invalid_actions(next_online_q, batch["next_valid_action_mask"])
             next_actions = torch.argmax(next_online_q, dim=1, keepdim=True)
             next_target_q = self.target_net(next_local_map, next_global_features).gather(1, next_actions).squeeze(1)
             td_target = rewards + self.config.gamma * next_target_q * (1.0 - dones)
@@ -219,6 +226,20 @@ class DoubleDQNAgent:
             self.target_net.load_state_dict(self.online_net.state_dict())
 
         return self.last_loss
+
+    def _mask_invalid_actions(
+        self,
+        q_values: torch.Tensor,
+        valid_actions: list[int] | np.ndarray,
+    ) -> torch.Tensor:
+        if isinstance(valid_actions, np.ndarray) and valid_actions.ndim == 2:
+            mask = torch.from_numpy(valid_actions).to(q_values.device)
+            return q_values.masked_fill(mask <= 0.0, float("-inf"))
+
+        mask = torch.full((self.action_dim,), float("-inf"), device=q_values.device)
+        if valid_actions:
+            mask[valid_actions] = 0.0
+        return q_values + mask
 
     def current_epsilon(self, global_step: int) -> float:
         if global_step >= self.config.epsilon_decay_steps:

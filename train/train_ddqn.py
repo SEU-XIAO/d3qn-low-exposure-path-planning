@@ -42,7 +42,15 @@ def train(config: TrainingConfig | None = None) -> None:
                 epsilon = agent.current_epsilon(global_step)
                 action = agent.select_action(observation, epsilon, env=env, global_step=global_step)
                 result = env.step(action)
-                agent.store_transition(observation, action, result.reward, result.observation, result.done)
+                next_valid_actions = env.get_valid_actions()
+                agent.store_transition(
+                    observation,
+                    action,
+                    result.reward,
+                    result.observation,
+                    result.done,
+                    next_valid_actions=next_valid_actions,
+                )
 
                 observation = result.observation
                 episode_reward += result.reward

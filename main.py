@@ -5,7 +5,7 @@ from models.policy_network import HybridPolicyNetwork
 def main() -> None:
     env = BattlefieldEnv()
     obs = env.reset()
-    model = HybridPolicyNetwork()
+    model = HybridPolicyNetwork(action_dim=len(BattlefieldEnv.ACTIONS))
     q_values = model.forward_numpy(obs)
 
     print("环境已初始化")

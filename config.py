@@ -28,9 +28,9 @@ class EnvConfig:
 
     step_penalty: float = 0.08
     visible_penalty: float = 1.25
-    progress_weight: float = 0.20
+    progress_weight: float = 0.40
     hidden_ratio_gain_weight: float = 0.75
-    goal_reward: float = 15.0
+    goal_reward: float = 50.0
     success_hidden_ratio_weight: float = 4.0
     collision_penalty: float = 1.0
 
@@ -45,7 +45,7 @@ class ModelConfig:
 @dataclass(frozen=True)
 class ExplorationConfig:
     heuristic_subset_enabled: bool = True
-    heuristic_subset_prob_start: float = 0.85
+    heuristic_subset_prob_start: float = 0.50
     heuristic_subset_prob_end: float = 0.10
     teacher_enabled: bool = False
     teacher_action_prob_start: float = 0.30
@@ -66,14 +66,14 @@ class TrainingDefaults:
     train_frequency: int = 1
     epsilon_start: float = 1.0
     epsilon_end: float = 0.05
-    epsilon_decay_steps: int = 20000
+    epsilon_decay_steps: int = 100000
     eval_interval: int = 50
     save_interval: int = 100
     max_gradient_norm: float = 5.0
     seed: int = 42
     exploration: ExplorationConfig = field(default_factory=ExplorationConfig)
     early_stop_enabled: bool = True
-    early_stop_eval_episodes: int = 3
-    early_stop_success_rate_threshold: float = 1.0
+    early_stop_eval_episodes: int = 10
+    early_stop_success_rate_threshold: float = 0.6
     early_stop_plateau_patience: int = 3
     early_stop_min_delta: float = 0.05

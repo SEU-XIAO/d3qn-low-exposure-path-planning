@@ -285,17 +285,32 @@ class BattlefieldEnv:
         return False
 
     def _extract_local_map(self) -> np.ndarray:
-        radius = self.config.local_map_size // 2
+        size = self.config.local_map_size
+        grid = self.grid_size
+
+        if size >= grid:
+            # Full-map view (no padding)
+            occ = self.occupancy_map.astype(np.float32)
+            vis = self.visibility_map.astype(np.float32)
+            goal = np.zeros_like(occ, dtype=np.float32)
+            goal[tuple(self.goal_position)] = 1.0
+            agent = np.zeros_like(occ, dtype=np.float32)
+            agent[tuple(self.agent_position)] = 1.0
+            return np.stack((occ, vis, goal, agent), axis=0).astype(np.float32)
+
+        radius = size // 2
         padded_occ = np.pad(self.occupancy_map, radius, mode="constant", constant_values=1.0)
         padded_visibility = np.pad(self.visibility_map, radius, mode="constant")
         padded_goal = np.pad(np.zeros_like(self.occupancy_map, dtype=np.float32), radius, mode="constant")
+        padded_agent = np.pad(np.zeros_like(self.occupancy_map, dtype=np.float32), radius, mode="constant")
 
         ax, ay = self.agent_position + radius
         gx, gy = self.goal_position
         goal_x = gx - self.agent_position[0] + radius
         goal_y = gy - self.agent_position[1] + radius
-        if 0 <= goal_x < self.config.local_map_size and 0 <= goal_y < self.config.local_map_size:
+        if 0 <= goal_x < size and 0 <= goal_y < size:
             padded_goal[ax - radius + goal_x, ay - radius + goal_y] = 1.0
+        padded_agent[ax, ay] = 1.0
 
         xs = slice(ax - radius, ax + radius + 1)
         ys = slice(ay - radius, ay + radius + 1)
@@ -303,8 +318,9 @@ class BattlefieldEnv:
         local_occ = padded_occ[xs, ys]
         local_visibility = padded_visibility[xs, ys]
         local_goal = padded_goal[xs, ys]
+        local_agent = padded_agent[xs, ys]
 
-        return np.stack((local_occ, local_visibility, local_goal), axis=0).astype(np.float32)
+        return np.stack((local_occ, local_visibility, local_goal, local_agent), axis=0).astype(np.float32)
 
     def _build_global_features(self) -> np.ndarray:
         relative_goal = (self.goal_position - self.agent_position).astype(np.float32) / self.grid_size

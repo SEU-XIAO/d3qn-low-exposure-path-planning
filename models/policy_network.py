@@ -8,9 +8,10 @@ from config import ModelConfig
 
 
 class HybridPolicyNetwork(nn.Module):
-    def __init__(self, config: ModelConfig | None = None) -> None:
+    def __init__(self, action_dim: int, config: ModelConfig | None = None) -> None:
         super().__init__()
         self.config = config or ModelConfig()
+        self.action_dim = action_dim
 
         self.local_encoder = nn.Sequential(
             nn.Conv2d(self.config.local_channels, 16, kernel_size=3, padding=1),
@@ -45,7 +46,7 @@ class HybridPolicyNetwork(nn.Module):
         self.advantage_head = nn.Sequential(
             nn.Linear(128, 64),
             nn.ReLU(),
-            nn.Linear(64, self.config.action_dim),
+            nn.Linear(64, self.action_dim),
         )
 
     def forward(self, local_map: torch.Tensor, global_features: torch.Tensor) -> torch.Tensor:
