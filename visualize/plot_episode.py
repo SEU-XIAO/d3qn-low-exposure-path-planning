@@ -101,13 +101,12 @@ def _render_single_path_3d(
     _plot_path_3d(ax_3d, dqn_summary["path"], color="#1f77b4", label="D3QN Path", z_offset=0.22, linestyle="-")
     _annotate_status(ax_3d, dqn_summary, None)
     ax_3d.set_title(title)
-    ax_3d.legend(loc="upper right")
 
     _plot_topdown_scene(ax_top, env, title="Top-Down Visibility View")
     _plot_path_topdown(ax_top, dqn_summary["path"], color="#1f77b4", label="D3QN Path", linestyle="-")
-    ax_top.legend(loc="upper right")
 
-    fig.tight_layout()
+    fig.subplots_adjust(right=0.82)
+    _add_shared_legend(fig, [ax_3d, ax_top])
 
     if save_path:
         plt.savefig(save_path, dpi=180, bbox_inches="tight")
@@ -128,17 +127,14 @@ def _render_comparison_3d(
 
     draw_3d_scene(ax_3d, env)
     _plot_path_3d(ax_3d, dqn_summary["path"], color="#1f77b4", label="D3QN", z_offset=0.18, linestyle="-")
-    _plot_path_3d(ax_3d, astar_result.path, color="#ff9f1c", label="Visibility-A*", z_offset=0.88, linestyle="-")
     _annotate_status(ax_3d, dqn_summary, astar_result)
     ax_3d.set_title(title)
-    ax_3d.legend(loc="upper right")
 
     _plot_topdown_scene(ax_top, env, title="Top-Down Path Comparison")
     _plot_path_topdown(ax_top, dqn_summary["path"], color="#1f77b4", label="D3QN", linestyle="-")
-    _plot_path_topdown(ax_top, astar_result.path, color="#ff9f1c", label="Visibility-A*", linestyle="-")
-    ax_top.legend(loc="upper right")
 
-    fig.tight_layout()
+    fig.subplots_adjust(right=0.82)
+    _add_shared_legend(fig, [ax_3d, ax_top])
 
     if save_path:
         plt.savefig(save_path, dpi=180, bbox_inches="tight")
@@ -222,7 +218,11 @@ def _plot_topdown_scene(ax: plt.Axes, env: BattlefieldEnv, title: str) -> None:
     ax.set_xlim(-0.5, env.grid_size - 0.5)
     ax.set_ylim(-0.5, env.grid_size - 0.5)
     ax.set_aspect("equal")
-    ax.grid(True, alpha=0.25, linewidth=0.6)
+    grid_edges = np.arange(-0.5, env.grid_size + 0.5, 1.0)
+    ax.set_xticks(grid_edges, minor=True)
+    ax.set_yticks(grid_edges, minor=True)
+    ax.grid(which="minor", color="#000000", alpha=0.6, linewidth=0.45, zorder=4)
+    ax.tick_params(axis="both", which="both", length=0, labelbottom=False, labelleft=False)
 
 
 def _plot_path_topdown(
@@ -284,9 +284,28 @@ def _annotate_status(ax: plt.Axes, dqn_summary: dict[str, Any], astar_result: Pa
     )
 
 
+def _add_shared_legend(fig: plt.Figure, axes: list[plt.Axes]) -> None:
+    handles: list[plt.Artist] = []
+    labels: list[str] = []
+    for ax in axes:
+        h, l = ax.get_legend_handles_labels()
+        for handle, label in zip(h, l):
+            if label and label not in labels:
+                labels.append(label)
+                handles.append(handle)
+    if handles:
+        fig.legend(
+            handles,
+            labels,
+            loc="center left",
+            bbox_to_anchor=(0.84, 0.5),
+            frameon=True,
+        )
+
+
 if __name__ == "__main__":
     plot_comparison(
         checkpoint_name="ddqn_best.pt",
-        scene_seed=1078,
+        scene_seed=1,
         scenario_mode="random",
     )

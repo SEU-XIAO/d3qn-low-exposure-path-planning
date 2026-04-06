@@ -199,6 +199,7 @@ class BattlefieldEnv:
         goal_start = max(0, self.grid_size - corner_span)
         goal_candidates = self._free_cells_in_region(goal_start, self.grid_size - 1, goal_start, self.grid_size - 1)
         enemy_xy = self.default_enemy_xy.astype(np.float32)
+        enemy_cell = tuple(int(v) for v in enemy_xy.tolist())
 
         if not start_candidates or not goal_candidates:
             return tuple(self.config.start), tuple(self.config.goal)
@@ -206,7 +207,7 @@ class BattlefieldEnv:
         for _ in range(512):
             start = start_candidates[int(rng.integers(0, len(start_candidates)))]
             goal = goal_candidates[int(rng.integers(0, len(goal_candidates)))]
-            if start == goal:
+            if start == goal or start == enemy_cell or goal == enemy_cell:
                 continue
             if np.linalg.norm(np.array(start, dtype=np.float32) - np.array(goal, dtype=np.float32)) < self.config.min_start_goal_distance:
                 continue
@@ -218,7 +219,7 @@ class BattlefieldEnv:
         for _ in range(256):
             start = start_candidates[int(rng.integers(0, len(start_candidates)))]
             goal = goal_candidates[int(rng.integers(0, len(goal_candidates)))]
-            if start == goal:
+            if start == goal or start == enemy_cell or goal == enemy_cell:
                 continue
             if np.linalg.norm(np.array(goal, dtype=np.float32) - enemy_xy) < self.config.enemy_goal_min_distance:
                 continue
@@ -263,6 +264,9 @@ class BattlefieldEnv:
         self.height_map[tuple(self.goal_position)] = 0
         self.occupancy_map[tuple(self.start_position)] = 0.0
         self.occupancy_map[tuple(self.goal_position)] = 0.0
+        enemy_cell = tuple(self.enemy_position[:2].astype(np.int32).tolist())
+        self.height_map[enemy_cell] = max(1, int(self.height_map[enemy_cell]))
+        self.occupancy_map[enemy_cell] = 1.0
 
     def _has_feasible_path(self) -> bool:
         start = tuple(self.start_position.tolist())
@@ -380,6 +384,8 @@ class BattlefieldEnv:
     def _is_blocked(self, position: np.ndarray) -> bool:
         x, y = int(position[0]), int(position[1])
         if x < 0 or y < 0 or x >= self.grid_size or y >= self.grid_size:
+            return True
+        if x == int(self.enemy_position[0]) and y == int(self.enemy_position[1]):
             return True
         return bool(self.occupancy_map[x, y] > 0)
 

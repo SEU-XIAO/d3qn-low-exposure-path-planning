@@ -58,13 +58,12 @@ def plot_scene(
         title += " | fixed scene"
 
     ax_3d.set_title(title)
-    ax_3d.legend(loc="upper right")
 
     _plot_topdown_scene(ax_top, env, title="Top-Down Visibility View")
     _plot_reference_path_topdown(ax_top, start, goal)
-    ax_top.legend(loc="upper right")
 
-    fig.subplots_adjust(left=0.03, right=0.99, bottom=0.05, top=0.93, wspace=0.06)
+    fig.subplots_adjust(left=0.03, right=0.82, bottom=0.05, top=0.93, wspace=0.06)
+    _add_shared_legend(fig, [ax_3d, ax_top])
 
     if save_path:
         plt.savefig(save_path, dpi=180, bbox_inches="tight")
@@ -275,6 +274,25 @@ def _plot_reference_path_topdown(ax: plt.Axes, start: np.ndarray, goal: np.ndarr
     path_x = np.linspace(start[0], goal[0], 25)
     path_y = np.linspace(start[1], goal[1], 25)
     ax.plot(path_x, path_y, linestyle="--", color="#1f77b4", alpha=0.5, label="Reference Line", zorder=6)
+
+
+def _add_shared_legend(fig: plt.Figure, axes: list[plt.Axes]) -> None:
+    handles: list[plt.Artist] = []
+    labels: list[str] = []
+    for ax in axes:
+        h, l = ax.get_legend_handles_labels()
+        for handle, label in zip(h, l):
+            if label and label not in labels:
+                labels.append(label)
+                handles.append(handle)
+    if handles:
+        fig.legend(
+            handles,
+            labels,
+            loc="center left",
+            bbox_to_anchor=(0.84, 0.5),
+            frameon=True,
+        )
 
 
 if __name__ == "__main__":
