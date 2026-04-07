@@ -29,9 +29,10 @@ def _compute_fov_masks(env: BattlefieldEnv) -> tuple[np.ndarray, np.ndarray]:
     in_fov = valid_distance & (cos_values >= cos_threshold)
     free_cells = env.occupancy_map <= 0
 
-    # Reuse env precomputed maps so visualization stays consistent with training/evaluation logic.
-    visible_mask = in_fov & free_cells & (env.visibility_map > 0)
-    occluded_mask = in_fov & free_cells & (env.cover_map > 0)
+    # Visible cells should strictly follow env precomputed visibility to avoid missing red cells.
+    visible_mask = (env.visibility_map > 0.5) & free_cells
+    # Occluded cells are fan cells that are free but not visible.
+    occluded_mask = in_fov & free_cells & (~visible_mask)
     return visible_mask, occluded_mask
 
 
@@ -296,4 +297,4 @@ def _add_shared_legend(fig: plt.Figure, axes: list[plt.Axes]) -> None:
 
 
 if __name__ == "__main__":
-    plot_scene(scene_seed=1)
+    plot_scene(scene_seed=7736)

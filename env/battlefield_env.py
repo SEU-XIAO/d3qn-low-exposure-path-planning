@@ -265,8 +265,9 @@ class BattlefieldEnv:
         self.occupancy_map[tuple(self.start_position)] = 0.0
         self.occupancy_map[tuple(self.goal_position)] = 0.0
         enemy_cell = tuple(self.enemy_position[:2].astype(np.int32).tolist())
-        self.height_map[enemy_cell] = max(1, int(self.height_map[enemy_cell]))
-        self.occupancy_map[enemy_cell] = 1.0
+        # Enemy is treated as a dynamic blocker in _is_blocked, not a terrain obstacle.
+        self.height_map[enemy_cell] = 0
+        self.occupancy_map[enemy_cell] = 0.0
 
     def _has_feasible_path(self) -> bool:
         start = tuple(self.start_position.tolist())
@@ -366,20 +367,37 @@ class BattlefieldEnv:
         return 1.0
 
     def _is_occluded(self, cell: tuple[int, int]) -> bool:
-        start = self.enemy_position[:2]
-        end = np.array((cell[0], cell[1]), dtype=np.float32)
-        line_points = self._sample_line(start, end, samples=40)
-        for point in line_points[1:-1]:
-            gx = int(np.clip(round(point[0]), 0, self.grid_size - 1))
-            gy = int(np.clip(round(point[1]), 0, self.grid_size - 1))
+        start = (int(round(float(self.enemy_position[0]))), int(round(float(self.enemy_position[1]))))
+        for gx, gy in self._bresenham_line_cells(start, cell)[1:-1]:
             if self.height_map[gx, gy] > 0:
                 return True
         return False
 
     @staticmethod
-    def _sample_line(start: np.ndarray, end: np.ndarray, samples: int) -> np.ndarray:
-        ratios = np.linspace(0.0, 1.0, num=samples, dtype=np.float32)
-        return start[None, :] * (1.0 - ratios[:, None]) + end[None, :] * ratios[:, None]
+    def _bresenham_line_cells(start: tuple[int, int], end: tuple[int, int]) -> list[tuple[int, int]]:
+        x0, y0 = start
+        x1, y1 = end
+        cells: list[tuple[int, int]] = []
+
+        dx = abs(x1 - x0)
+        dy = abs(y1 - y0)
+        sx = 1 if x0 < x1 else -1
+        sy = 1 if y0 < y1 else -1
+        err = dx - dy
+
+        while True:
+            cells.append((x0, y0))
+            if x0 == x1 and y0 == y1:
+                break
+            e2 = 2 * err
+            if e2 > -dy:
+                err -= dy
+                x0 += sx
+            if e2 < dx:
+                err += dx
+                y0 += sy
+
+        return cells
 
     def _is_blocked(self, position: np.ndarray) -> bool:
         x, y = int(position[0]), int(position[1])

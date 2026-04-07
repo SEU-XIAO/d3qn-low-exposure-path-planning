@@ -35,7 +35,7 @@ def plot_comparison(
     pareto_front = ParetoVisibilityAStarPlanner(env).plan(
         start=tuple(env.start_position.tolist()),
         goal=tuple(env.goal_position.tolist()),
-        max_solutions=6,
+        max_solutions=1,
     )
     pareto_result = _select_pareto_path(env, pareto_front)
     title = _build_comparison_title(env, dqn_summary, pareto_result)
@@ -48,7 +48,7 @@ def _collect_dqn_path(
     scenario_mode: str = "fixed",
 ) -> tuple[dict[str, Any], BattlefieldEnv]:
     root_dir = Path(__file__).resolve().parents[1]
-    checkpoint_path = root_dir / "artifacts" / checkpoint_name
+    checkpoint_path = root_dir / "artifacts/v2" / checkpoint_name
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"未找到模型文件: {checkpoint_path}")
 
@@ -328,6 +328,6 @@ def _add_shared_legend(fig: plt.Figure, axes: list[plt.Axes]) -> None:
 if __name__ == "__main__":
     plot_comparison(
         checkpoint_name="ddqn_best.pt",
-        scene_seed=1,
+        scene_seed=7334,
         scenario_mode="random",
     )

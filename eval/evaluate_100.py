@@ -19,7 +19,7 @@ def evaluate(
     scenario_mode: str = "random",
 ) -> Path:
     root_dir = Path(__file__).resolve().parents[1]
-    checkpoint_path = root_dir / "artifacts" / checkpoint_name
+    checkpoint_path = root_dir / "artifacts/v2" / checkpoint_name
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"未找到模型文件: {checkpoint_path}")
 
@@ -76,7 +76,7 @@ def evaluate(
         "avg_collisions": float(df["collisions"].mean()),
     }
 
-    output_dir = root_dir / "artifacts"
+    output_dir = root_dir / "artifacts/v2"
     output_dir.mkdir(parents=True, exist_ok=True)
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     if output_path is None:
