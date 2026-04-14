@@ -43,6 +43,9 @@ class BattlefieldEnv:
         self.start_position = self.default_start.copy()
         self.enemy_position = np.array((self.default_enemy_xy[0], self.default_enemy_xy[1], 0.0), dtype=np.float32)
         self.enemy_forward = self._normalize(self.default_enemy_forward.copy())
+        self.enemy_pose_source = "default"
+        self.enemy_pose_score = 0.0
+        self.enemy_heading_deg = self._heading_deg(self.enemy_forward)
 
         self.height_map = np.zeros((self.grid_size, self.grid_size), dtype=np.int32)
         self.occupancy_map = np.zeros((self.grid_size, self.grid_size), dtype=np.float32)
@@ -120,6 +123,8 @@ class BattlefieldEnv:
             done = True
 
         if self.steps >= self.config.max_steps:
+            if not success:
+                reward -= self.config.timeout_penalty
             done = True
 
         current_visibility = float(self.visibility_map[tuple(self.agent_position)])
@@ -167,7 +172,11 @@ class BattlefieldEnv:
         self.goal_position = self.default_goal.copy()
         self.enemy_position = np.array((self.default_enemy_xy[0], self.default_enemy_xy[1], 0.0), dtype=np.float32)
         self.enemy_forward = self._normalize(self.default_enemy_forward.copy())
+        self.enemy_pose_source = "fixed-default"
+        self.enemy_heading_deg = self._heading_deg(self.enemy_forward)
         self._finalize_scene_maps()
+        enemy_xy = tuple(int(v) for v in self.enemy_position[:2].astype(np.int32).tolist())
+        self.enemy_pose_score = self._compute_visibility_area_score(enemy_xy, self.enemy_forward)
 
     def _generate_random_scene(self, scene_seed: int) -> None:
         rng = np.random.default_rng(scene_seed)
@@ -180,9 +189,12 @@ class BattlefieldEnv:
             self.start_position = np.array(start, dtype=np.int32)
             self.goal_position = np.array(goal, dtype=np.int32)
 
-            enemy_xy, enemy_forward = self._search_enemy_lookout_pose(rng)
+            enemy_xy, enemy_forward, enemy_score = self._search_enemy_lookout_pose(rng)
             self.enemy_position = np.array((enemy_xy[0], enemy_xy[1], 0.0), dtype=np.float32)
             self.enemy_forward = self._normalize(enemy_forward)
+            self.enemy_pose_source = "random-search"
+            self.enemy_pose_score = float(enemy_score)
+            self.enemy_heading_deg = self._heading_deg(self.enemy_forward)
             self._finalize_scene_maps()
 
             if self._has_feasible_path():
@@ -253,7 +265,7 @@ class BattlefieldEnv:
         center = np.array((self.grid_size / 2.0, self.grid_size / 2.0), dtype=np.float32)
         return center - enemy_xy.astype(np.float32)
 
-    def _search_enemy_lookout_pose(self, rng: np.random.Generator) -> tuple[tuple[int, int], np.ndarray]:
+    def _search_enemy_lookout_pose(self, rng: np.random.Generator) -> tuple[tuple[int, int], np.ndarray, float]:
         free_cells = self._free_cells()
         start = tuple(self.start_position.tolist())
         goal = tuple(self.goal_position.tolist())
@@ -272,7 +284,9 @@ class BattlefieldEnv:
 
         if not candidates:
             fallback_xy = tuple(int(v) for v in self.default_enemy_xy.tolist())
-            return fallback_xy, self._normalize(self._sample_enemy_forward(self.default_enemy_xy))
+            fallback_forward = self._normalize(self._sample_enemy_forward(self.default_enemy_xy))
+            fallback_score = self._compute_visibility_area_score(fallback_xy, fallback_forward)
+            return fallback_xy, fallback_forward, fallback_score
 
         max_candidates = max(1, int(self.config.enemy_search_max_candidates))
         if len(candidates) > max_candidates:
@@ -308,7 +322,8 @@ class BattlefieldEnv:
         if not coarse_ranked:
             fallback_xy = candidates[int(rng.integers(0, len(candidates)))]
             fallback_forward = self._normalize(self._sample_enemy_forward(np.array(fallback_xy, dtype=np.float32)))
-            return fallback_xy, fallback_forward
+            fallback_score = self._compute_visibility_area_score(fallback_xy, fallback_forward)
+            return fallback_xy, fallback_forward, fallback_score
 
         coarse_ranked.sort(key=lambda item: item[0], reverse=True)
         refine_topk = max(1, int(self.config.enemy_search_topk_refine))
@@ -325,7 +340,7 @@ class BattlefieldEnv:
                 best_candidate = candidate
                 best_heading = heading
 
-        return best_candidate, best_heading
+        return best_candidate, best_heading, float(best_score)
 
     def _compute_visibility_area_score(self, observer_xy: tuple[int, int], observer_forward: np.ndarray) -> float:
         score = 0.0
@@ -566,3 +581,7 @@ class BattlefieldEnv:
         if norm < 1e-6:
             return vector
         return vector / norm
+
+    @staticmethod
+    def _heading_deg(vector: np.ndarray) -> float:
+        return float((np.degrees(np.arctan2(vector[1], vector[0])) + 360.0) % 360.0)

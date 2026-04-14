@@ -57,6 +57,8 @@ def plot_scene(
         title += f" | random seed={env.current_scene_seed}"
     else:
         title += " | fixed scene"
+    title += f" | enemy=({int(env.enemy_position[0])},{int(env.enemy_position[1])})"
+    title += f" theta={env.enemy_heading_deg:.1f}deg"
 
     ax_3d.set_title(title)
 
@@ -96,7 +98,7 @@ def draw_3d_scene(ax: plt.Axes, env: BattlefieldEnv) -> None:
 
     ax.scatter(start[0] + 0.4, start[1] + 0.4, 0.45, color="green", s=80, label="Start")
     ax.scatter(goal[0] + 0.4, goal[1] + 0.4, 0.45, color="blue", s=80, label="Goal")
-    ax.scatter(enemy[0] + 0.4, enemy[1] + 0.4, 0.05, color="red", s=90, label="Enemy")
+    ax.scatter(enemy[0] + 0.4, enemy[1] + 0.4, 0.05, color="red", s=90, label="Enemy Lookout")
 
     _plot_3d_floor_grid(ax, env)
     _plot_enemy_fov(ax, env)
@@ -195,6 +197,15 @@ def _plot_enemy_fov(ax: plt.Axes, env: BattlefieldEnv) -> None:
     ax.plot(left_x, left_y, [0.06, 0.06], color="#e85d5d", alpha=0.75, linewidth=1.2)
     ax.plot(right_x, right_y, [0.06, 0.06], color="#e85d5d", alpha=0.75, linewidth=1.2)
     ax.plot(fan_x, fan_y, fan_z + 0.01, color="#e85d5d", alpha=0.65, linewidth=1.2)
+    ax.plot(
+        [enemy[0], enemy[0] + radius * 0.35 * np.cos(yaw_center)],
+        [enemy[1], enemy[1] + radius * 0.35 * np.sin(yaw_center)],
+        [0.08, 0.08],
+        color="#d32f2f",
+        linewidth=2.2,
+        alpha=0.9,
+        label="Enemy Heading",
+    )
 
 
 def _plot_reference_path(ax: plt.Axes, start: np.ndarray, goal: np.ndarray) -> None:
@@ -253,10 +264,34 @@ def _plot_topdown_scene(ax: plt.Axes, env: BattlefieldEnv, title: str) -> None:
 
     ax.scatter(start[0], start[1], color="green", s=110, label="Start", zorder=5)
     ax.scatter(goal[0], goal[1], color="blue", s=110, label="Goal", zorder=5)
-    ax.scatter(enemy[0], enemy[1], color="red", s=120, label="Enemy", zorder=5)
+    ax.scatter(enemy[0], enemy[1], color="red", s=120, label="Enemy Lookout", zorder=5)
+    heading_scale = 2.2
+    ax.arrow(
+        float(enemy[0]),
+        float(enemy[1]),
+        float(env.enemy_forward[0]) * heading_scale,
+        float(env.enemy_forward[1]) * heading_scale,
+        width=0.08,
+        head_width=0.55,
+        head_length=0.65,
+        length_includes_head=True,
+        color="#d32f2f",
+        alpha=0.95,
+        zorder=6,
+    )
+    ax.text(
+        float(enemy[0]) + 0.5,
+        float(enemy[1]) + 0.6,
+        f"theta={env.enemy_heading_deg:.1f}deg\nscore={env.enemy_pose_score:.0f}\n{env.enemy_pose_source}",
+        fontsize=8.5,
+        color="#7a1f1f",
+        bbox={"boxstyle": "round,pad=0.2", "facecolor": "white", "alpha": 0.85, "edgecolor": "#ddbbbb"},
+        zorder=7,
+    )
 
     ax.scatter([], [], marker="s", s=80, color="#ff8a80", alpha=0.55, label="FOV Visible")
     ax.scatter([], [], marker="s", s=80, color="#9aa0a6", alpha=0.5, label="FOV Occluded")
+    ax.scatter([], [], marker="", label="Enemy heading shown by arrow")
 
     ax.set_title(title)
     ax.set_xlabel("X")

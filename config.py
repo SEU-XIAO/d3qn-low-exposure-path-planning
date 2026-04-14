@@ -56,13 +56,15 @@ class EnvConfig:
     # 向目标接近的奖励权重（按距离变化计算）。
     progress_weight: float = 0.40
     # 隐蔽比例提升的奖励权重（基于 hidden_ratio 增量）。
-    hidden_ratio_gain_weight: float = 0.75
+    hidden_ratio_gain_weight: float = 0.25
     # 到达目标的终点奖励。
-    goal_reward: float = 50.0
+    goal_reward: float = 80.0
     # 成功后按隐蔽比例追加的奖励权重。
     success_hidden_ratio_weight: float = 4.0
     # 撞到障碍的惩罚。
     collision_penalty: float = 1.0
+    # 超过最大步数仍未到达终点时的惩罚。
+    timeout_penalty: float = 8.0
 
 
 @dataclass(frozen=True)
@@ -102,7 +104,7 @@ class TrainingDefaults:
     # 折扣因子。
     gamma: float = 0.99
     # 学习率。
-    learning_rate: float = 3e-4
+    learning_rate: float = 1e-4
     # 目标网络更新间隔（步数）。
     target_update_interval: int = 500
     # 预热步数（达到后开始训练）。

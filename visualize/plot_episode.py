@@ -127,7 +127,7 @@ def _render_single_path_3d(
 
     draw_3d_scene(ax_3d, env)
     _plot_path_3d(ax_3d, dqn_summary["path"], color="#1f77b4", label="D3QN Path", z_offset=0.22, linestyle="-")
-    _annotate_status(ax_3d, dqn_summary, None)
+    _annotate_status(ax_3d, env, dqn_summary, None)
     ax_3d.set_title(title)
 
     _plot_topdown_scene(ax_top, env, title="Top-Down Visibility View")
@@ -152,14 +152,23 @@ def _render_comparison_3d(
 
     _plot_topdown_scene(ax_left, env, title="")
     _plot_path_topdown(ax_left, scalar_result.path, color="#ff9f1c", label="J(p) A*", linestyle="-")
-    _annotate_status(ax_left, dqn_summary, scalar_result)
 
     _plot_topdown_scene(ax_top, env, title="Top-Down Path Comparison")
     _plot_path_topdown(ax_top, dqn_summary["path"], color="#1f77b4", label="D3QN", linestyle="-")
 
     fig.suptitle(title, x=0.5, y=0.98)
-    fig.subplots_adjust(left=0.04, right=0.88, bottom=0.06, top=0.92, wspace=0.06)
-    _add_shared_legend(fig, [ax_left, ax_top])
+    fig.subplots_adjust(left=0.04, right=0.80, bottom=0.06, top=0.92, wspace=0.06)
+    status_lines = _build_status_lines(env, dqn_summary, scalar_result)
+    fig.text(
+        0.82,
+        0.89,
+        "\n".join(status_lines),
+        ha="left",
+        va="top",
+        fontsize=10,
+        bbox={"boxstyle": "round,pad=0.3", "facecolor": "white", "alpha": 0.86, "edgecolor": "#cccccc"},
+    )
+    _add_shared_legend(fig, [ax_left, ax_top], bbox_to_anchor=(0.82, 0.43))
 
     _finalize_figure(fig, save_path, default_name="comparison_plot.png")
 
@@ -252,9 +261,33 @@ def _plot_topdown_scene(ax: plt.Axes, env: BattlefieldEnv, title: str) -> None:
 
     ax.scatter(start[0], start[1], color="green", s=110, label="Start", zorder=5)
     ax.scatter(goal[0], goal[1], color="blue", s=110, label="Goal", zorder=5)
-    ax.scatter(enemy[0], enemy[1], color="red", s=120, label="Enemy", zorder=5)
+    ax.scatter(enemy[0], enemy[1], color="red", s=120, label="Enemy Lookout", zorder=5)
+    heading_scale = 2.2
+    ax.arrow(
+        float(enemy[0]),
+        float(enemy[1]),
+        float(env.enemy_forward[0]) * heading_scale,
+        float(env.enemy_forward[1]) * heading_scale,
+        width=0.08,
+        head_width=0.55,
+        head_length=0.65,
+        length_includes_head=True,
+        color="#d32f2f",
+        alpha=0.95,
+        zorder=6,
+    )
+    ax.text(
+        float(enemy[0]) + 0.5,
+        float(enemy[1]) + 0.6,
+        f"theta={env.enemy_heading_deg:.1f}deg\nscore={env.enemy_pose_score:.0f}\n{env.enemy_pose_source}",
+        fontsize=8.5,
+        color="#7a1f1f",
+        bbox={"boxstyle": "round,pad=0.2", "facecolor": "white", "alpha": 0.85, "edgecolor": "#ddbbbb"},
+        zorder=7,
+    )
     ax.scatter([], [], marker="s", s=80, color="#ff8a80", alpha=0.55, label="FOV Visible")
     ax.scatter([], [], marker="s", s=80, color="#9aa0a6", alpha=0.5, label="FOV Occluded")
+    ax.scatter([], [], marker="", label="Enemy heading shown by arrow")
 
     ax.set_title(title)
     ax.set_xlabel("X")
@@ -291,16 +324,50 @@ def _build_title(prefix: str, env: BattlefieldEnv) -> str:
 
 def _build_single_title(env: BattlefieldEnv, dqn_summary: dict[str, Any]) -> str:
     title = _build_title("3D D3QN Episode Path", env)
-    return f"{title} | success={dqn_summary['success']} | hidden_ratio={dqn_summary['hidden_ratio']:.3f}"
+    return (
+        f"{title} | enemy=({int(env.enemy_position[0])},{int(env.enemy_position[1])}) "
+        f"theta={env.enemy_heading_deg:.1f}deg | success={dqn_summary['success']} "
+        f"| hidden_ratio={dqn_summary['hidden_ratio']:.3f}"
+    )
 
 
 def _build_comparison_title(env: BattlefieldEnv, dqn_summary: dict[str, Any], scalar_result: PathResult) -> str:
     title = _build_title("J(p)=L+lambda*V A* vs D3QN", env)
-    return f"{title} | J(p) A*={scalar_result.success} | D3QN={dqn_summary['success']}"
+    return (
+        f"{title} | enemy=({int(env.enemy_position[0])},{int(env.enemy_position[1])}) "
+        f"theta={env.enemy_heading_deg:.1f}deg | J(p) A*={scalar_result.success} | D3QN={dqn_summary['success']}"
+    )
 
 
-def _annotate_status(ax: plt.Axes, dqn_summary: dict[str, Any], scalar_result: PathResult | None) -> None:
+def _annotate_status(
+    ax: plt.Axes,
+    env: BattlefieldEnv,
+    dqn_summary: dict[str, Any],
+    scalar_result: PathResult | None,
+) -> None:
+    lines = _build_status_lines(env, dqn_summary, scalar_result)
+
+    ax.text(
+        0.98,
+        0.98,
+        "\n".join(lines),
+        transform=ax.transAxes,
+        ha="right",
+        va="top",
+        fontsize=10,
+        bbox={"boxstyle": "round,pad=0.3", "facecolor": "white", "alpha": 0.82, "edgecolor": "#cccccc"},
+    )
+
+
+def _build_status_lines(
+    env: BattlefieldEnv,
+    dqn_summary: dict[str, Any],
+    scalar_result: PathResult | None,
+) -> list[str]:
     lines = [
+        f"Enemy lookout=({int(env.enemy_position[0])},{int(env.enemy_position[1])})",
+        f"Enemy theta={env.enemy_heading_deg:.1f}deg ({env.enemy_pose_source})",
+        f"Enemy score={env.enemy_pose_score:.0f}",
         f"D3QN success={dqn_summary['success']}",
         f"D3QN final={dqn_summary['final_position']}",
         f"Goal={dqn_summary['goal_position']}",
@@ -317,18 +384,10 @@ def _annotate_status(ax: plt.Axes, dqn_summary: dict[str, Any], scalar_result: P
         if not scalar_result.success:
             lines.append("J(p) A* failed to find a full path")
 
-    ax.text(
-        0.02,
-        0.98,
-        "\n".join(lines),
-        transform=ax.transAxes,
-        va="top",
-        fontsize=10,
-        bbox={"boxstyle": "round,pad=0.3", "facecolor": "white", "alpha": 0.82, "edgecolor": "#cccccc"},
-    )
+    return lines
 
 
-def _add_shared_legend(fig: plt.Figure, axes: list[plt.Axes]) -> None:
+def _add_shared_legend(fig: plt.Figure, axes: list[plt.Axes], bbox_to_anchor: tuple[float, float] = (0.93, 0.5)) -> None:
     handles: list[plt.Artist] = []
     labels: list[str] = []
     for ax in axes:
@@ -342,14 +401,14 @@ def _add_shared_legend(fig: plt.Figure, axes: list[plt.Axes]) -> None:
             handles,
             labels,
             loc="center left",
-            bbox_to_anchor=(0.84, 0.5),
+            bbox_to_anchor=bbox_to_anchor,
             frameon=True,
         )
-
+ 
 
 if __name__ == "__main__":
     plot_comparison(
         checkpoint_name="ddqn_best.pt",
-        scene_seed=7200,
+        scene_seed=7201,
         scenario_mode="random",
     )
