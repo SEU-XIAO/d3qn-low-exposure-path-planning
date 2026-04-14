@@ -37,7 +37,7 @@ class EnvConfig:
     # 训练用随机场景种子集合。
     train_scene_seeds: tuple[int, ...] = tuple(range(1000, 4500))
     # 验证用随机场景种子集合。
-    val_scene_seeds: tuple[int, ...] = tuple(range(5000, 5020))
+    val_scene_seeds: tuple[int, ...] = tuple(range(5000, 5100))
     # 测试用随机场景种子集合。
     test_scene_seeds: tuple[int, ...] = tuple(range(6000, 6020))
     # 固定场景默认起点（或随机失败时兜底起点）。
@@ -52,15 +52,15 @@ class EnvConfig:
     # 每一步基础惩罚，鼓励更短路径。
     step_penalty: float = 0.08
     # 处在可见区域的额外惩罚系数。
-    visible_penalty: float = 1.25
+    visible_penalty: float = 1.0
     # 向目标接近的奖励权重（按距离变化计算）。
-    progress_weight: float = 0.40
+    progress_weight: float = 0.60
     # 隐蔽比例提升的奖励权重（基于 hidden_ratio 增量）。
     hidden_ratio_gain_weight: float = 0.25
     # 到达目标的终点奖励。
     goal_reward: float = 80.0
     # 成功后按隐蔽比例追加的奖励权重。
-    success_hidden_ratio_weight: float = 4.0
+    success_hidden_ratio_weight: float = 2.0
     # 撞到障碍的惩罚。
     collision_penalty: float = 1.0
     # 超过最大步数仍未到达终点时的惩罚。
@@ -84,11 +84,11 @@ class ExplorationConfig:
     # 启发式子集的结束使用概率（随训练衰减）。
     heuristic_subset_prob_end: float = 0.10
     # 是否启用 teacher 动作（A* 引导）。
-    teacher_enabled: bool = False
+    teacher_enabled: bool = True
     # teacher 动作的起始使用概率。
-    teacher_action_prob_start: float = 0.30
+    teacher_action_prob_start: float = 0.15
     # teacher 动作的结束使用概率。
-    teacher_action_prob_end: float = 0.00
+    teacher_action_prob_end: float = 0.03
 
 
 @dataclass(frozen=True)
