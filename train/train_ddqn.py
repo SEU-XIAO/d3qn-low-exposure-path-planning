@@ -104,6 +104,9 @@ def train(config: TrainingConfig | None = None) -> None:
                     log_fn=log,
                 )
 
+                selection_summary: dict[str, float] | None = None
+                selection_scope = "none"
+
                 if config.full_eval_interval > 0 and episode % config.full_eval_interval == 0:
                     full_eval_summary = evaluate_policy(
                         agent,
@@ -119,20 +122,26 @@ def train(config: TrainingConfig | None = None) -> None:
                         f"avg_hidden_ratio={full_eval_summary['avg_hidden_ratio']:.3f} | "
                         f"avg_path_len={full_eval_summary['avg_path_length']:.3f}"
                     )
+                    selection_summary = full_eval_summary
+                    selection_scope = f"full-{len(env.config.val_scene_seeds)}"
 
-                if _is_better_eval(eval_summary, best_eval_success_rate, best_eval_reward, config.early_stop_min_delta):
-                    best_eval_reward = eval_summary["avg_reward"]
-                    best_eval_success_rate = eval_summary["success_rate"]
+                if selection_summary is None:
+                    continue
+
+                if _is_better_eval(selection_summary, best_eval_success_rate, best_eval_reward, config.early_stop_min_delta):
+                    best_eval_reward = selection_summary["avg_reward"]
+                    best_eval_success_rate = selection_summary["success_rate"]
                     plateau_count = 0
                     agent.save(str(best_path))
                     log(
                         f"[Best] success_rate={best_eval_success_rate:.2f} | avg_reward={best_eval_reward:7.3f} | "
-                        f"avg_hidden_ratio={eval_summary['avg_hidden_ratio']:.3f} | saved={best_path}"
+                        f"avg_hidden_ratio={selection_summary['avg_hidden_ratio']:.3f} | "
+                        f"scope={selection_scope} | saved={best_path}"
                     )
                 elif (
                     config.early_stop_enabled
-                    and eval_summary["success_rate"] >= config.early_stop_success_rate_threshold
-                    and eval_summary["avg_reward"] <= best_eval_reward + config.early_stop_min_delta
+                    and selection_summary["success_rate"] >= config.early_stop_success_rate_threshold
+                    and selection_summary["avg_reward"] <= best_eval_reward + config.early_stop_min_delta
                 ):
                     plateau_count += 1
                     log(
@@ -191,8 +200,9 @@ def evaluate_policy(
     avg_hidden_ratio = statistics.mean(hidden_ratios) if hidden_ratios else 0.0
     avg_path_length = statistics.mean(path_lengths) if path_lengths else 0.0
     success_rate = successes / max(1, len(seeds))
+    eval_tag = "[Eval]" if len(seeds) <= config_default_eval_count() else "[Eval-Full]"
     eval_message = (
-        f"[Eval] avg_reward={avg_reward:7.3f} | success_rate={success_rate:.2f} | "
+        f"{eval_tag} avg_reward={avg_reward:7.3f} | success_rate={success_rate:.2f} | "
         f"avg_hidden_ratio={avg_hidden_ratio:.3f} | avg_path_len={avg_path_length:.3f}"
     )
     if log_fn is None:
@@ -205,6 +215,10 @@ def evaluate_policy(
         "avg_hidden_ratio": avg_hidden_ratio,
         "avg_path_length": avg_path_length,
     }
+
+
+def config_default_eval_count() -> int:
+    return TrainingConfig().early_stop_eval_episodes
 
 
 def _is_better_eval(

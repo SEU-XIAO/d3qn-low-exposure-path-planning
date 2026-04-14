@@ -52,9 +52,9 @@ class EnvConfig:
     # 每一步基础惩罚，鼓励更短路径。
     step_penalty: float = 0.08
     # 处在可见区域的额外惩罚系数。
-    visible_penalty: float = 1.0
+    visible_penalty: float = 0.8
     # 向目标接近的奖励权重（按距离变化计算）。
-    progress_weight: float = 0.60
+    progress_weight: float = 0.75
     # 隐蔽比例提升的奖励权重（基于 hidden_ratio 增量）。
     hidden_ratio_gain_weight: float = 0.25
     # 到达目标的终点奖励。
@@ -64,7 +64,7 @@ class EnvConfig:
     # 撞到障碍的惩罚。
     collision_penalty: float = 1.0
     # 超过最大步数仍未到达终点时的惩罚。
-    timeout_penalty: float = 8.0
+    timeout_penalty: float = 12.0
 
 
 @dataclass(frozen=True)
@@ -88,7 +88,7 @@ class ExplorationConfig:
     # teacher 动作的起始使用概率。
     teacher_action_prob_start: float = 0.15
     # teacher 动作的结束使用概率。
-    teacher_action_prob_end: float = 0.03
+    teacher_action_prob_end: float = 0.01
 
 
 @dataclass(frozen=True)
@@ -134,7 +134,7 @@ class TrainingDefaults:
     # early stop 评估时使用的 episode 数。
     early_stop_eval_episodes: int = 20
     # early stop 成功率阈值。
-    early_stop_success_rate_threshold: float = 0.6
+    early_stop_success_rate_threshold: float = 0.8
     # early stop 平台期容忍次数。
     early_stop_plateau_patience: int = 3
     # early stop 判断提升的最小增量。
