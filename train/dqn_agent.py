@@ -29,6 +29,7 @@ class TrainingConfig:
     epsilon_end: float = TrainingDefaults().epsilon_end
     epsilon_decay_steps: int = TrainingDefaults().epsilon_decay_steps
     eval_interval: int = TrainingDefaults().eval_interval
+    full_eval_interval: int = TrainingDefaults().full_eval_interval
     save_interval: int = TrainingDefaults().save_interval
     max_gradient_norm: float = TrainingDefaults().max_gradient_norm
     seed: int = TrainingDefaults().seed

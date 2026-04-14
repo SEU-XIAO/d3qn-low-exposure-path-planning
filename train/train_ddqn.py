@@ -89,6 +89,21 @@ def train(config: TrainingConfig | None = None) -> None:
                     scenario_mode="random",
                 )
 
+                if config.full_eval_interval > 0 and episode % config.full_eval_interval == 0:
+                    full_eval_summary = evaluate_policy(
+                        agent,
+                        env,
+                        scene_seeds=env.config.val_scene_seeds,
+                        scenario_mode="random",
+                    )
+                    print(
+                        f"[Eval-Full] scenes={len(env.config.val_scene_seeds)} | "
+                        f"avg_reward={full_eval_summary['avg_reward']:7.3f} | "
+                        f"success_rate={full_eval_summary['success_rate']:.2f} | "
+                        f"avg_hidden_ratio={full_eval_summary['avg_hidden_ratio']:.3f} | "
+                        f"avg_path_len={full_eval_summary['avg_path_length']:.3f}"
+                    )
+
                 if _is_better_eval(eval_summary, best_eval_success_rate, best_eval_reward, config.early_stop_min_delta):
                     best_eval_reward = eval_summary["avg_reward"]
                     best_eval_success_rate = eval_summary["success_rate"]

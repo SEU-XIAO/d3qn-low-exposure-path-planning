@@ -179,8 +179,10 @@ class BattlefieldEnv:
 
             self.start_position = np.array(start, dtype=np.int32)
             self.goal_position = np.array(goal, dtype=np.int32)
-            self.enemy_position = np.array((self.default_enemy_xy[0], self.default_enemy_xy[1], 0.0), dtype=np.float32)
-            self.enemy_forward = self._normalize(self._sample_enemy_forward(self.default_enemy_xy))
+
+            enemy_xy, enemy_forward = self._search_enemy_lookout_pose(rng)
+            self.enemy_position = np.array((enemy_xy[0], enemy_xy[1], 0.0), dtype=np.float32)
+            self.enemy_forward = self._normalize(enemy_forward)
             self._finalize_scene_maps()
 
             if self._has_feasible_path():
@@ -251,6 +253,87 @@ class BattlefieldEnv:
         center = np.array((self.grid_size / 2.0, self.grid_size / 2.0), dtype=np.float32)
         return center - enemy_xy.astype(np.float32)
 
+    def _search_enemy_lookout_pose(self, rng: np.random.Generator) -> tuple[tuple[int, int], np.ndarray]:
+        free_cells = self._free_cells()
+        start = tuple(self.start_position.tolist())
+        goal = tuple(self.goal_position.tolist())
+
+        candidates: list[tuple[int, int]] = []
+        for cell in free_cells:
+            if cell == start or cell == goal:
+                continue
+            goal_dist = float(np.linalg.norm(np.array(cell, dtype=np.float32) - self.goal_position.astype(np.float32)))
+            if goal_dist < self.config.enemy_goal_min_distance:
+                continue
+            start_dist = float(np.linalg.norm(np.array(cell, dtype=np.float32) - self.start_position.astype(np.float32)))
+            if start_dist < self.config.enemy_start_min_distance:
+                continue
+            candidates.append(cell)
+
+        if not candidates:
+            fallback_xy = tuple(int(v) for v in self.default_enemy_xy.tolist())
+            return fallback_xy, self._normalize(self._sample_enemy_forward(self.default_enemy_xy))
+
+        max_candidates = max(1, int(self.config.enemy_search_max_candidates))
+        if len(candidates) > max_candidates:
+            sampled_idx = rng.choice(len(candidates), size=max_candidates, replace=False)
+            candidates = [candidates[int(idx)] for idx in sampled_idx]
+
+        heading_bins = max(1, int(self.config.enemy_heading_bins))
+        heading_vectors = [
+            np.array((np.cos(2.0 * np.pi * i / heading_bins), np.sin(2.0 * np.pi * i / heading_bins)), dtype=np.float32)
+            for i in range(heading_bins)
+        ]
+
+        coarse_ranked: list[tuple[int, int, int]] = []
+        target_cells = np.array(free_cells, dtype=np.float32)
+        fov_half_cos = float(np.cos(np.deg2rad(self.config.enemy_horizontal_fov_deg / 2.0)))
+
+        for candidate_idx, candidate in enumerate(candidates):
+            candidate_xy = np.array(candidate, dtype=np.float32)
+            delta = target_cells - candidate_xy
+            distance = np.linalg.norm(delta, axis=1)
+            in_range = (distance > 1e-6) & (distance <= self.config.enemy_max_range)
+            if not bool(np.any(in_range)):
+                continue
+
+            direction_unit = delta[in_range] / distance[in_range][:, None]
+            for heading_idx, heading in enumerate(heading_vectors):
+                cosine = direction_unit @ heading
+                score = int(np.count_nonzero(cosine >= fov_half_cos))
+                if score <= 0:
+                    continue
+                coarse_ranked.append((score, candidate_idx, heading_idx))
+
+        if not coarse_ranked:
+            fallback_xy = candidates[int(rng.integers(0, len(candidates)))]
+            fallback_forward = self._normalize(self._sample_enemy_forward(np.array(fallback_xy, dtype=np.float32)))
+            return fallback_xy, fallback_forward
+
+        coarse_ranked.sort(key=lambda item: item[0], reverse=True)
+        refine_topk = max(1, int(self.config.enemy_search_topk_refine))
+
+        best_score = -1.0
+        best_candidate = candidates[coarse_ranked[0][1]]
+        best_heading = heading_vectors[coarse_ranked[0][2]]
+        for _, candidate_idx, heading_idx in coarse_ranked[:refine_topk]:
+            candidate = candidates[candidate_idx]
+            heading = heading_vectors[heading_idx]
+            score = self._compute_visibility_area_score(candidate, heading)
+            if score > best_score:
+                best_score = score
+                best_candidate = candidate
+                best_heading = heading
+
+        return best_candidate, best_heading
+
+    def _compute_visibility_area_score(self, observer_xy: tuple[int, int], observer_forward: np.ndarray) -> float:
+        score = 0.0
+        for x in range(self.grid_size):
+            for y in range(self.grid_size):
+                score += self._compute_cell_visibility_from(observer_xy, observer_forward, (x, y))
+        return score
+
     def _finalize_scene_maps(self) -> None:
         self.occupancy_map = (self.height_map > 0).astype(np.float32)
         self._enforce_start_goal_free_cells()
@@ -266,8 +349,27 @@ class BattlefieldEnv:
         self.occupancy_map[tuple(self.goal_position)] = 0.0
         enemy_cell = tuple(self.enemy_position[:2].astype(np.int32).tolist())
         # Enemy is treated as a dynamic blocker in _is_blocked, not a terrain obstacle.
-        self.height_map[enemy_cell] = 0
-        self.occupancy_map[enemy_cell] = 0.0
+        ex, ey = enemy_cell
+        fx, fy = float(self.enemy_forward[0]), float(self.enemy_forward[1])
+        if abs(fx) >= abs(fy):
+            if fx >= 0.0:
+                x0, x1 = ex, ex + 2
+            else:
+                x0, x1 = ex - 2, ex
+            y0, y1 = ey - 1, ey + 1
+        else:
+            x0, x1 = ex - 1, ex + 1
+            if fy >= 0.0:
+                y0, y1 = ey, ey + 2
+            else:
+                y0, y1 = ey - 2, ey
+
+        x0 = max(0, x0)
+        x1 = min(self.grid_size - 1, x1)
+        y0 = max(0, y0)
+        y1 = min(self.grid_size - 1, y1)
+        self.height_map[x0 : x1 + 1, y0 : y1 + 1] = 0
+        self.occupancy_map[x0 : x1 + 1, y0 : y1 + 1] = 0.0
 
     def _has_feasible_path(self) -> bool:
         start = tuple(self.start_position.tolist())
@@ -342,62 +444,97 @@ class BattlefieldEnv:
         )
 
     def _recompute_visibility_map(self) -> None:
+        enemy_cell = (int(round(float(self.enemy_position[0]))), int(round(float(self.enemy_position[1]))))
         for x in range(self.grid_size):
             for y in range(self.grid_size):
-                visibility = self._compute_cell_visibility((x, y))
+                visibility = self._compute_cell_visibility_from(enemy_cell, self.enemy_forward, (x, y))
                 self.visibility_map[x, y] = visibility
                 self.cover_map[x, y] = 1.0 - visibility
 
     def _compute_cell_visibility(self, cell: tuple[int, int]) -> float:
+        enemy_cell = (int(round(float(self.enemy_position[0]))), int(round(float(self.enemy_position[1]))))
+        return self._compute_cell_visibility_from(enemy_cell, self.enemy_forward, cell)
+
+    def _compute_cell_visibility_from(
+        self,
+        observer_xy: tuple[int, int],
+        observer_forward: np.ndarray,
+        cell: tuple[int, int],
+    ) -> float:
         if self.occupancy_map[cell] > 0:
             return 0.0
 
-        direction = np.array((cell[0], cell[1]), dtype=np.float32) - self.enemy_position[:2]
+        direction = np.array((cell[0], cell[1]), dtype=np.float32) - np.array(observer_xy, dtype=np.float32)
         distance = float(np.linalg.norm(direction))
         if distance < 1e-6 or distance > self.config.enemy_max_range:
             return 0.0
 
         direction_unit = direction / distance
-        total_cosine = float(np.clip(np.dot(direction_unit, self.enemy_forward), -1.0, 1.0))
+        total_cosine = float(np.clip(np.dot(direction_unit, observer_forward), -1.0, 1.0))
         horizontal_angle = degrees(acos(total_cosine))
         if horizontal_angle > self.config.enemy_horizontal_fov_deg / 2.0:
             return 0.0
-        if self._is_occluded(cell):
+        if self._is_occluded_from(observer_xy, cell):
             return 0.0
         return 1.0
 
     def _is_occluded(self, cell: tuple[int, int]) -> bool:
         start = (int(round(float(self.enemy_position[0]))), int(round(float(self.enemy_position[1]))))
-        for gx, gy in self._bresenham_line_cells(start, cell)[1:-1]:
-            if self.height_map[gx, gy] > 0:
-                return True
-        return False
+        return self._is_occluded_from(start, cell)
 
-    @staticmethod
-    def _bresenham_line_cells(start: tuple[int, int], end: tuple[int, int]) -> list[tuple[int, int]]:
-        x0, y0 = start
-        x1, y1 = end
-        cells: list[tuple[int, int]] = []
+    def _is_occluded_from(self, start: tuple[int, int], end: tuple[int, int]) -> bool:
+        if start == end:
+            return False
 
-        dx = abs(x1 - x0)
-        dy = abs(y1 - y0)
-        sx = 1 if x0 < x1 else -1
-        sy = 1 if y0 < y1 else -1
-        err = dx - dy
+        x, y = int(start[0]), int(start[1])
+        end_x, end_y = int(end[0]), int(end[1])
 
-        while True:
-            cells.append((x0, y0))
-            if x0 == x1 and y0 == y1:
+        dx = end_x - x
+        dy = end_y - y
+        step_x = 0 if dx == 0 else (1 if dx > 0 else -1)
+        step_y = 0 if dy == 0 else (1 if dy > 0 else -1)
+
+        abs_dx = abs(dx)
+        abs_dy = abs(dy)
+        t_delta_x = float("inf") if step_x == 0 else 1.0 / abs_dx
+        t_delta_y = float("inf") if step_y == 0 else 1.0 / abs_dy
+
+        start_x = float(x) + 0.5
+        start_y = float(y) + 0.5
+
+        if step_x > 0:
+            t_max_x = (float(x + 1) - start_x) / abs_dx
+        elif step_x < 0:
+            t_max_x = (start_x - float(x)) / abs_dx
+        else:
+            t_max_x = float("inf")
+
+        if step_y > 0:
+            t_max_y = (float(y + 1) - start_y) / abs_dy
+        elif step_y < 0:
+            t_max_y = (start_y - float(y)) / abs_dy
+        else:
+            t_max_y = float("inf")
+
+        while (x, y) != (end_x, end_y):
+            if t_max_x < t_max_y:
+                x += step_x
+                t_max_x += t_delta_x
+            elif t_max_y < t_max_x:
+                y += step_y
+                t_max_y += t_delta_y
+            else:
+                x += step_x
+                y += step_y
+                t_max_x += t_delta_x
+                t_max_y += t_delta_y
+
+            if (x, y) == (end_x, end_y):
                 break
-            e2 = 2 * err
-            if e2 > -dy:
-                err -= dy
-                x0 += sx
-            if e2 < dx:
-                err += dx
-                y0 += sy
+            if self.height_map[x, y] > 0:
+                return True
 
-        return cells
+        return False
 
     def _is_blocked(self, position: np.ndarray) -> bool:
         x, y = int(position[0]), int(position[1])

@@ -3,11 +3,18 @@ from __future__ import annotations
 from planner.visibility_astar import PathResult, VisibilityAwareAStarPlanner
 
 
-class WeightedVisibilityAStarPlanner(VisibilityAwareAStarPlanner):
-    """Weighted sum A* variant: cost = path_length + visible_weight * visible_path_length."""
+class ScalarizedVisibilityAStarPlanner(VisibilityAwareAStarPlanner):
+    """Single-objective A*: J(p)=L(p)+lambda*V(p)."""
+
+    def __init__(self, env, lambda_visibility: float = 6.0) -> None:
+        super().__init__(env, visible_weight=lambda_visibility)
+
+
+class WeightedVisibilityAStarPlanner(ScalarizedVisibilityAStarPlanner):
+    """Backward-compatible alias for ScalarizedVisibilityAStarPlanner."""
 
     def __init__(self, env, visible_weight: float = 6.0) -> None:
-        super().__init__(env, visible_weight=visible_weight)
+        super().__init__(env, lambda_visibility=visible_weight)
 
 
-__all__ = ["WeightedVisibilityAStarPlanner", "PathResult"]
+__all__ = ["ScalarizedVisibilityAStarPlanner", "WeightedVisibilityAStarPlanner", "PathResult"]

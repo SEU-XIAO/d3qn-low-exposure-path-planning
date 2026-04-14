@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import time
 from typing import Any
 
 import matplotlib.pyplot as plt
@@ -9,7 +10,7 @@ from matplotlib.patches import Rectangle
 
 from env.battlefield_env import BattlefieldEnv
 from planner.visibility_astar import PathResult, VisibilityAwareAStarPlanner
-from planner.pareto_astar import ParetoVisibilityAStarPlanner, ParetoFrontResult
+from planner.weighted_astar import ScalarizedVisibilityAStarPlanner
 from train.dqn_agent import DoubleDQNAgent, TrainingConfig
 from visualize.plot_scene import draw_3d_scene, _compute_fov_masks
 
@@ -31,15 +32,39 @@ def plot_comparison(
     scene_seed: int | None = None,
     scenario_mode: str = "fixed",
 ) -> None:
+    t0 = time.perf_counter()
+    print("[Plot] Stage 1/4: collecting D3QN path...")
     dqn_summary, env = _collect_dqn_path(checkpoint_name, scene_seed=scene_seed, scenario_mode=scenario_mode)
-    pareto_front = ParetoVisibilityAStarPlanner(env).plan(
-        start=tuple(env.start_position.tolist()),
-        goal=tuple(env.goal_position.tolist()),
-        max_solutions=1,
-    )
-    pareto_result = _select_pareto_path(env, pareto_front)
-    title = _build_comparison_title(env, dqn_summary, pareto_result)
-    _render_comparison_3d(env, dqn_summary, pareto_result, title, save_path)
+    print(f"[Plot] Stage 1/4 done in {time.perf_counter() - t0:.2f}s")
+
+    print("[Plot] Stage 2/4: running scalarized planner J=L+lambda*V...")
+    t_plan = time.perf_counter()
+    try:
+        scalar_result = ScalarizedVisibilityAStarPlanner(env, lambda_visibility=6.0).plan(
+            start=tuple(env.start_position.tolist()),
+            goal=tuple(env.goal_position.tolist()),
+        )
+        print(
+            f"[Plot] Stage 2/4 done in {time.perf_counter() - t_plan:.2f}s | "
+            f"success={scalar_result.success} steps={scalar_result.steps}"
+        )
+    except Exception as exc:
+        start = tuple(env.start_position.tolist())
+        print(f"[Plot Warning] Scalarized planning failed, fallback to D3QN-only rendering: {exc}")
+        scalar_result = PathResult(
+            path=[start],
+            total_cost=float("inf"),
+            path_length=0.0,
+            visible_path_length=0.0,
+            hidden_path_length=0.0,
+            hidden_ratio=1.0,
+            steps=0,
+            success=False,
+        )
+    title = _build_comparison_title(env, dqn_summary, scalar_result)
+    print("[Plot] Stage 3/4: rendering figure...")
+    _render_comparison_3d(env, dqn_summary, scalar_result, title, save_path)
+    print(f"[Plot] Stage 4/4 done | total elapsed={time.perf_counter() - t0:.2f}s")
 
 
 def _collect_dqn_path(
@@ -111,16 +136,13 @@ def _render_single_path_3d(
     fig.subplots_adjust(right=0.82)
     _add_shared_legend(fig, [ax_3d, ax_top])
 
-    if save_path:
-        plt.savefig(save_path, dpi=180, bbox_inches="tight")
-    else:
-        plt.show()
+    _finalize_figure(fig, save_path, default_name="episode_plot.png")
 
 
 def _render_comparison_3d(
     env: BattlefieldEnv,
     dqn_summary: dict[str, Any],
-    pareto_result: PathResult,
+    scalar_result: PathResult,
     title: str,
     save_path: str | None,
 ) -> None:
@@ -129,8 +151,8 @@ def _render_comparison_3d(
     ax_top = fig.add_subplot(1, 2, 2)
 
     _plot_topdown_scene(ax_left, env, title="")
-    _plot_path_topdown(ax_left, pareto_result.path, color="#ff9f1c", label="Pareto A*", linestyle="-")
-    _annotate_status(ax_left, dqn_summary, pareto_result)
+    _plot_path_topdown(ax_left, scalar_result.path, color="#ff9f1c", label="J(p) A*", linestyle="-")
+    _annotate_status(ax_left, dqn_summary, scalar_result)
 
     _plot_topdown_scene(ax_top, env, title="Top-Down Path Comparison")
     _plot_path_topdown(ax_top, dqn_summary["path"], color="#1f77b4", label="D3QN", linestyle="-")
@@ -139,10 +161,29 @@ def _render_comparison_3d(
     fig.subplots_adjust(left=0.04, right=0.88, bottom=0.06, top=0.92, wspace=0.06)
     _add_shared_legend(fig, [ax_left, ax_top])
 
+    _finalize_figure(fig, save_path, default_name="comparison_plot.png")
+
+
+def _finalize_figure(fig: plt.Figure, save_path: str | None, default_name: str) -> None:
     if save_path:
-        plt.savefig(save_path, dpi=180, bbox_inches="tight")
-    else:
-        plt.show()
+        fig.savefig(save_path, dpi=180, bbox_inches="tight")
+        print(f"[Plot] saved to: {save_path}")
+        plt.close(fig)
+        return
+
+    backend = plt.get_backend().lower()
+    if "agg" in backend:
+        output_dir = Path(__file__).resolve().parents[1] / "artifacts" / "plots"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = output_dir / default_name
+        fig.savefig(output_path, dpi=180, bbox_inches="tight")
+        print(f"[Plot] backend={plt.get_backend()} (non-interactive), saved to: {output_path}")
+        plt.close(fig)
+        return
+
+    print(f"[Plot] backend={plt.get_backend()} interactive window opening (close window to continue)...")
+    plt.show(block=True)
+    plt.close(fig)
 
 
 def _plot_path_3d(
@@ -248,36 +289,17 @@ def _build_title(prefix: str, env: BattlefieldEnv) -> str:
     return f"{prefix} | fixed scene"
 
 
-def _select_pareto_path(env: BattlefieldEnv, pareto: ParetoFrontResult) -> PathResult:
-    if not pareto.paths:
-        start = tuple(env.start_position.tolist())
-        return PathResult(
-            path=[start],
-            total_cost=float("inf"),
-            path_length=0.0,
-            visible_path_length=0.0,
-            hidden_path_length=0.0,
-            hidden_ratio=1.0,
-            steps=0,
-            success=False,
-        )
-    return min(
-        pareto.paths,
-        key=lambda r: (r.path_length, -r.hidden_ratio),
-    )
-
-
 def _build_single_title(env: BattlefieldEnv, dqn_summary: dict[str, Any]) -> str:
     title = _build_title("3D D3QN Episode Path", env)
     return f"{title} | success={dqn_summary['success']} | hidden_ratio={dqn_summary['hidden_ratio']:.3f}"
 
 
-def _build_comparison_title(env: BattlefieldEnv, dqn_summary: dict[str, Any], pareto_result: PathResult) -> str:
-    title = _build_title("Pareto-A* vs D3QN Top-Down Comparison", env)
-    return f"{title} | Pareto-A*={pareto_result.success} | D3QN={dqn_summary['success']}"
+def _build_comparison_title(env: BattlefieldEnv, dqn_summary: dict[str, Any], scalar_result: PathResult) -> str:
+    title = _build_title("J(p)=L+lambda*V A* vs D3QN", env)
+    return f"{title} | J(p) A*={scalar_result.success} | D3QN={dqn_summary['success']}"
 
 
-def _annotate_status(ax: plt.Axes, dqn_summary: dict[str, Any], pareto_result: PathResult | None) -> None:
+def _annotate_status(ax: plt.Axes, dqn_summary: dict[str, Any], scalar_result: PathResult | None) -> None:
     lines = [
         f"D3QN success={dqn_summary['success']}",
         f"D3QN final={dqn_summary['final_position']}",
@@ -287,13 +309,13 @@ def _annotate_status(ax: plt.Axes, dqn_summary: dict[str, Any], pareto_result: P
         f"D3QN final_visible={dqn_summary['final_visibility']:.0f}",
     ]
 
-    if pareto_result is not None:
-        lines.append(f"Pareto-A* success={pareto_result.success}")
-        lines.append(f"Pareto-A* steps={pareto_result.steps}")
-        lines.append(f"Pareto-A* hidden_ratio={pareto_result.hidden_ratio:.3f}")
-        lines.append(f"Pareto-A* final={pareto_result.path[-1]}")
-        if not pareto_result.success:
-            lines.append("Pareto-A* failed to find a full path")
+    if scalar_result is not None:
+        lines.append(f"J(p) A* success={scalar_result.success}")
+        lines.append(f"J(p) A* steps={scalar_result.steps}")
+        lines.append(f"J(p) A* hidden_ratio={scalar_result.hidden_ratio:.3f}")
+        lines.append(f"J(p) A* final={scalar_result.path[-1]}")
+        if not scalar_result.success:
+            lines.append("J(p) A* failed to find a full path")
 
     ax.text(
         0.02,
@@ -328,6 +350,6 @@ def _add_shared_legend(fig: plt.Figure, axes: list[plt.Axes]) -> None:
 if __name__ == "__main__":
     plot_comparison(
         checkpoint_name="ddqn_best.pt",
-        scene_seed=7334,
+        scene_seed=7200,
         scenario_mode="random",
     )

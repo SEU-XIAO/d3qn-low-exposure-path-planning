@@ -32,6 +32,8 @@ class ParetoVisibilityAStarPlanner:
         start: tuple[int, int] | None = None,
         goal: tuple[int, int] | None = None,
         max_solutions: int | None = None,
+        max_expansions: int | None = None,
+        progress_interval: int = 0,
     ) -> ParetoFrontResult:
         start = start or tuple(self.env.agent_position.tolist())
         goal = goal or tuple(self.env.goal_position.tolist())
@@ -41,6 +43,7 @@ class ParetoVisibilityAStarPlanner:
         goal_labels: list[int] = []
         open_list: list[tuple[float, int, int]] = []
         counter = 0
+        expansions = 0
 
         def add_label(node: tuple[int, int], g_len: float, g_vis: float, parent: int | None) -> int:
             label = _Label(node=node, g_len=g_len, g_vis=g_vis, parent=parent)
@@ -84,6 +87,19 @@ class ParetoVisibilityAStarPlanner:
             active_indices = node_labels.get(lab.node, [])
             if label_idx not in active_indices:
                 continue
+
+            expansions += 1
+            if progress_interval > 0 and expansions % progress_interval == 0:
+                print(
+                    f"[Pareto] expanded={expansions} open={len(open_list)} "
+                    f"labels={len(labels)} goals={len(goal_labels)}"
+                )
+            if max_expansions is not None and expansions >= max_expansions:
+                print(
+                    f"[Pareto] reached max_expansions={max_expansions}, "
+                    f"returning current front (goals={len(goal_labels)})"
+                )
+                break
 
             # If goal already dominates this label, no need to expand.
             if goal_labels and is_dominated(lab.g_len, lab.g_vis, goal_labels):

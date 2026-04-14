@@ -20,6 +20,14 @@ class EnvConfig:
     enemy_max_range: float = 24.0
     # 敌人到目标点的最小距离约束（避免目标过近）。
     enemy_goal_min_distance: float = 10.0
+    # 敌人到起点的最小距离约束（避免开局贴脸）。
+    enemy_start_min_distance: float = 8.0
+    # 随机场景中敌人朝向离散角度数量（例如 12 表示每 30 度一个方向）。
+    enemy_heading_bins: int = 12
+    # 搜索最佳瞭望点时最多评估的候选敌人站位数量（会从可行格子中采样）。
+    enemy_search_max_candidates: int = 96
+    # 两阶段搜索中进入精评估（含遮挡射线）的候选数量。
+    enemy_search_topk_refine: int = 24
 
     # 每个格子独立成为障碍的概率（伯努利采样）。
     obstacle_probability: float = 0.06
@@ -109,6 +117,8 @@ class TrainingDefaults:
     epsilon_decay_steps: int = 100000
     # 评估间隔（每隔多少 episode 评估一次）。
     eval_interval: int = 50
+    # 全量评估间隔（每隔多少 episode 使用全部验证场景评估一次，0 表示关闭）。
+    full_eval_interval: int = 200
     # 保存间隔（每隔多少 episode 保存一次）。
     save_interval: int = 100
     # 梯度裁剪最大范数。
@@ -120,7 +130,7 @@ class TrainingDefaults:
     # 是否启用 early stop。
     early_stop_enabled: bool = True
     # early stop 评估时使用的 episode 数。
-    early_stop_eval_episodes: int = 10
+    early_stop_eval_episodes: int = 20
     # early stop 成功率阈值。
     early_stop_success_rate_threshold: float = 0.6
     # early stop 平台期容忍次数。
