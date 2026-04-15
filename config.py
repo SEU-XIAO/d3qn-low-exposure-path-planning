@@ -64,7 +64,7 @@ class EnvConfig:
     # 撞到障碍的惩罚。
     collision_penalty: float = 1.0
     # 超过最大步数仍未到达终点时的惩罚。
-    timeout_penalty: float = 12.0
+    timeout_penalty: float = 40.0
 
 
 @dataclass(frozen=True)

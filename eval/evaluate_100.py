@@ -13,13 +13,13 @@ from train.dqn_agent import DoubleDQNAgent, TrainingConfig
 
 def evaluate(
     checkpoint_name: str = "ddqn_best.pt",
-    num_episodes: int = 1000,
+    num_episodes: int = 100,
     seed_start: int = 7200,
     output_path: str | None = None,
     scenario_mode: str = "random",
 ) -> Path:
     root_dir = Path(__file__).resolve().parents[1]
-    checkpoint_path = root_dir / "artifacts/v2" / checkpoint_name
+    checkpoint_path = root_dir / "artifacts/v3" / checkpoint_name
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"未找到模型文件: {checkpoint_path}")
 
