@@ -115,7 +115,7 @@ class ParetoVisibilityAStarPlanner:
 
             for dx, dy in self.moves:
                 neighbor = (lab.node[0] + dx, lab.node[1] + dy)
-                if self._is_blocked(neighbor):
+                if self._is_blocked(lab.node, neighbor):
                     continue
 
                 move_cost = sqrt(2.0) if abs(dx) + abs(dy) == 2 else 1.0
@@ -164,10 +164,10 @@ class ParetoVisibilityAStarPlanner:
         straight = max(dx, dy) - diagonal
         return diagonal * sqrt(2.0) + straight
 
-    def _is_blocked(self, cell: tuple[int, int]) -> bool:
+    def _is_blocked(self, current: tuple[int, int], cell: tuple[int, int]) -> bool:
         x, y = cell
         if x < 0 or y < 0 or x >= self.env.grid_size or y >= self.env.grid_size:
             return True
         if x == int(self.env.enemy_position[0]) and y == int(self.env.enemy_position[1]):
             return True
-        return bool(self.env.occupancy_map[cell] > 0)
+        return not self.env.can_move_between(current, cell)

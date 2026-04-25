@@ -126,7 +126,7 @@ def _render_single_path_3d(
     ax_top = fig.add_subplot(1, 2, 2)
 
     draw_3d_scene(ax_3d, env)
-    _plot_path_3d(ax_3d, dqn_summary["path"], color="#1f77b4", label="D3QN Path", z_offset=0.22, linestyle="-")
+    _plot_path_3d(ax_3d, env, dqn_summary["path"], color="#1f77b4", label="D3QN Path", z_offset=0.22, linestyle="-")
     _annotate_status(ax_3d, env, dqn_summary, None)
     ax_3d.set_title(title)
 
@@ -197,6 +197,7 @@ def _finalize_figure(fig: plt.Figure, save_path: str | None, default_name: str) 
 
 def _plot_path_3d(
     ax: plt.Axes,
+    env: BattlefieldEnv,
     path_cells: list[tuple[int, int]],
     color: str,
     label: str,
@@ -205,7 +206,7 @@ def _plot_path_3d(
 ) -> None:
     xs = [cell[0] + 0.4 for cell in path_cells]
     ys = [cell[1] + 0.4 for cell in path_cells]
-    zs = [z_offset for _ in path_cells]
+    zs = [float(env.height_map[cell]) + z_offset for cell in path_cells]
 
     ax.plot(xs, ys, zs, color=color, linewidth=3.2, linestyle=linestyle, label=label)
     ax.scatter(xs[0], ys[0], zs[0], color=color, s=42, alpha=0.95)
