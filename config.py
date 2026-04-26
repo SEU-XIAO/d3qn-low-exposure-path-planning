@@ -13,7 +13,7 @@ class EnvConfig:
     max_steps: int = 150
 
     # 场景模式："fixed" 固定地图，"random" 随机地图，"full_map" 全图滑动窗口。
-    scenario_mode: str = "random"
+    scenario_mode: str = "full_map"
 
     # ---- 通行与爬坡 ----
     # 单个格子的实际尺寸（米），用于计算爬坡梯度。
@@ -24,9 +24,9 @@ class EnvConfig:
 
     # ---- 全图模式配置 ----
     # 全图高度文件路径（.txt），为空时使用程序化地形生成。
-    full_map_path: str = ""
+    full_map_path: str = "MyPath_Data417.txt"
     # 预计算敌人位置池文件路径（JSON），为空时需运行 enemy_search.py 生成。
-    enemy_pool_path: str = ""
+    enemy_pool_path: str = "artifacts/enemy_pool.json"
     # 敌人位置池大小（训练时从中随机选取，增加场景多样性）。
     enemy_pool_size: int = 8
 

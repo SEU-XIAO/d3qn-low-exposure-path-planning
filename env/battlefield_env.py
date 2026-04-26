@@ -59,6 +59,7 @@ class BattlefieldEnv:
         # ---- 全图模式状态 ----
         self.full_terrain: FullTerrain | None = None
         self.enemy_pool: list[tuple[int, int]] = []  # 全局坐标的敌人候选位置列表
+        self.full_visibility_maps: list[np.ndarray] = []  # 预计算的 8 张全图可见性底图
         self.window_offset: tuple[int, int] = (0, 0)  # 窗口在全局图中的左上角偏移
         self.window_tag_map: np.ndarray | None = None  # 当前窗口的 tag 图
 
@@ -74,7 +75,8 @@ class BattlefieldEnv:
     def _init_full_map_mode(self) -> None:
         self.full_terrain = load_terrain(self.config.full_map_path)
         self.height_levels = int(self.full_terrain.height_map.max())
-        # 尝试加载敌人池
+
+        # 加载敌人池 JSON
         pool_path = self.config.enemy_pool_path
         if pool_path and Path(pool_path).exists():
             with open(pool_path, "r", encoding="utf-8") as f:
@@ -82,6 +84,15 @@ class BattlefieldEnv:
             self.enemy_pool = [tuple(e) for e in data.get("enemy_pool", [])]
         else:
             self.enemy_pool = []
+
+        # 加载预计算可见性底图 NPZ
+        vis_npz = Path(pool_path).parent / "visibility_maps.npz" if pool_path else None
+        if vis_npz and vis_npz.exists():
+            loaded = np.load(vis_npz)
+            self.full_visibility_maps = [loaded[f"vis_{i}"] for i in range(len(self.enemy_pool))]
+            print(f"已加载 {len(self.full_visibility_maps)} 张全图可见性底图")
+        else:
+            self.full_visibility_maps = []
 
     # ============================================================
     #  reset / step / observation
@@ -191,6 +202,27 @@ class BattlefieldEnv:
         ft = self.full_terrain
         if ft is None:
             raise RuntimeError("full_terrain 未加载")
+
+        # 从池中选敌人（全局坐标），同时选定对应的可见性底图
+        if not self.enemy_pool:
+            raise RuntimeError("敌人池为空，请先运行 enemy_search.py 生成")
+        enemy_idx = int(rng.integers(0, len(self.enemy_pool)))
+        enemy_global = self.enemy_pool[enemy_idx]
+        self.enemy_position = np.array(
+            (enemy_global[0], enemy_global[1], float(ft.height_map[enemy_global])),
+            dtype=np.float32,
+        )
+        self.enemy_forward = self._normalize(np.array((0.0, -1.0), dtype=np.float32))
+        self.enemy_pose_source = "pool"
+        self.enemy_heading_deg = self._heading_deg(self.enemy_forward)
+
+        # 选定当前敌人对应的全图可见性底图（预计算好的）
+        current_full_vis = (
+            self.full_visibility_maps[enemy_idx]
+            if enemy_idx < len(self.full_visibility_maps)
+            else None
+        )
+
         max_ox = ft.full_width - self.grid_size
         max_oy = ft.full_height - self.grid_size
 
@@ -202,7 +234,6 @@ class BattlefieldEnv:
             self.height_map = ft.height_map[oy:oy + self.grid_size, ox:ox + self.grid_size].copy()
             self.window_tag_map = ft.tag_map[oy:oy + self.grid_size, ox:ox + self.grid_size].copy()
 
-            # 检查窗口内可通行区域是否足够（至少 30% 的格子 tag=0）
             passable_ratio = float((self.window_tag_map == 0).sum()) / (self.grid_size * self.grid_size)
             if passable_ratio < 0.3:
                 continue
@@ -211,21 +242,17 @@ class BattlefieldEnv:
             self.start_position = np.array(start, dtype=np.int32)
             self.goal_position = np.array(goal, dtype=np.int32)
 
-            enemy = self._pick_enemy_in_window(rng)
-            if enemy is None:
-                enemy = self._fallback_enemy_in_window(rng)
-            self.enemy_position = np.array((enemy[0], enemy[1], 0.0), dtype=np.float32)
-            self.enemy_forward = self._normalize(np.array((0.0, -1.0), dtype=np.float32))
-            self.enemy_pose_source = "full_map"
-            self.enemy_heading_deg = self._heading_deg(self.enemy_forward)
-            self._update_enemy_height_from_full()
-
-            # 先做便宜的 BFS 可达性检查，通过后再做昂贵的可见性计算
             if not self._has_feasible_path_window():
                 continue
 
-            self.enemy_pose_score = self._compute_visibility_area_score_window(enemy)
-            self._finalize_scene_maps()
+            # 从预计算底图切片得到可见性（无需射线计算）
+            if current_full_vis is not None:
+                self.visibility_map = current_full_vis[oy:oy + self.grid_size, ox:ox + self.grid_size].astype(np.float32)
+                self.cover_map = 1.0 - self.visibility_map
+                self.occupancy_map = (self.height_map.astype(np.float32) / max(1.0, float(self.height_levels)))
+            else:
+                self._finalize_scene_maps()
+
             return
 
         raise RuntimeError(f"无法为 scene_seed={scene_seed} 生成可达窗口场景")
@@ -274,14 +301,13 @@ class BattlefieldEnv:
 
     def _fallback_enemy_in_window(self, rng: np.random.Generator) -> tuple[int, int]:
         """池中无可用敌人时，在窗口北侧选一个高点。"""
-        region_start = max(0, self.grid_size - self.config.enemy_region_width)
         fallback: list[tuple[int, int]] = []
-        for y in range(region_start, self.grid_size):
-            for x in range(self.grid_size):
+        for x in range(self.config.enemy_region_width):
+            for y in range(self.grid_size):
                 if self.window_tag_map is not None and self.window_tag_map[x, y] == 0:
                     fallback.append((x, y))
         if not fallback:
-            return (self.grid_size // 2, self.grid_size - 2)
+            return (min(self.config.enemy_region_width - 1, self.grid_size - 1), self.grid_size // 2)
         # 按高度排序，取 top 10%
         fallback.sort(key=lambda c: self.height_map[c], reverse=True)
         top_n = max(1, len(fallback) // 10)
@@ -354,8 +380,10 @@ class BattlefieldEnv:
             return True
         if not self._cell_passable(x, y):
             return True
-        if x == int(self.enemy_position[0]) and y == int(self.enemy_position[1]):
-            return True
+        # 全图模式下敌人可能在窗口外，仅敌人在窗口内时检查碰撞
+        if self.current_scenario_mode != "full_map":
+            if x == int(self.enemy_position[0]) and y == int(self.enemy_position[1]):
+                return True
         if current is None:
             current = self.agent_position
         return not self.can_move_between((int(current[0]), int(current[1])), (x, y))
@@ -402,13 +430,18 @@ class BattlefieldEnv:
         return 1.0
 
     def _is_occluded_from(self, start: tuple[int, int], end: tuple[int, int]) -> bool:
+        """start 在 enemy_position 坐标系（全图模式=全局，否则=窗口），end 在窗口坐标。"""
         if start == end:
             return False
 
+        if self.current_scenario_mode == "full_map" and self.full_terrain is not None:
+            return self._is_occluded_global(start, end)
+
+        # 随机/固定模式：都在窗口坐标内
         start_x, start_y = float(start[0]) + 0.5, float(start[1]) + 0.5
         end_x, end_y = float(end[0]) + 0.5, float(end[1]) + 0.5
-        start_z = self._global_cell_height(start) + float(self.config.enemy_eye_height)
-        end_z = self._global_cell_height(end) + float(self.config.target_visibility_height)
+        start_z = self._cell_height(start) + float(self.config.enemy_eye_height)
+        end_z = self._cell_height(end) + float(self.config.target_visibility_height)
 
         length_xy = max(abs(end_x - start_x), abs(end_y - start_y))
         samples = max(2, int(length_xy * max(1, self.config.line_of_sight_samples_per_cell)))
@@ -419,15 +452,48 @@ class BattlefieldEnv:
             px = start_x + (end_x - start_x) * t
             py = start_y + (end_y - start_y) * t
             pz = start_z + (end_z - start_z) * t
-
             cx = int(np.clip(np.floor(px), 0, self.grid_size - 1))
             cy = int(np.clip(np.floor(py), 0, self.grid_size - 1))
             cell = (cx, cy)
             if cell == start or cell == end:
                 continue
-            if self._global_cell_height(cell) + occluder_bias >= pz:
+            if self._cell_height(cell) + occluder_bias >= pz:
                 return True
+        return False
 
+    def _is_occluded_global(self, start_global: tuple[int, int], end_window: tuple[int, int]) -> bool:
+        """全图模式：start 是全局坐标，end 是窗口坐标，射线在全局空间采样。"""
+        ox, oy = self.window_offset
+        ft = self.full_terrain
+        H, W = ft.height_map.shape
+        end_global = (end_window[0] + oy, end_window[1] + ox)
+
+        if start_global == end_global:
+            return False
+
+        sx = float(start_global[0]) + 0.5
+        sy = float(start_global[1]) + 0.5
+        ex = float(end_global[0]) + 0.5
+        ey = float(end_global[1]) + 0.5
+        sz = float(ft.height_map[start_global]) + float(self.config.enemy_eye_height)
+        ez = float(ft.height_map[end_global]) + float(self.config.target_visibility_height)
+
+        length_xy = max(abs(ex - sx), abs(ey - sy))
+        samples = max(2, int(length_xy * max(1, self.config.line_of_sight_samples_per_cell)))
+        bias = float(self.config.visibility_occluder_bias)
+
+        for i in range(1, samples):
+            t = i / samples
+            px = sx + (ex - sx) * t
+            py = sy + (ey - sy) * t
+            pz = sz + (ez - sz) * t
+            cx = int(np.clip(np.floor(px), 0, H - 1))
+            cy = int(np.clip(np.floor(py), 0, W - 1))
+            cell = (cx, cy)
+            if cell == start_global or cell == end_global:
+                continue
+            if float(ft.height_map[cell]) + bias >= pz:
+                return True
         return False
 
     def _global_cell_height(self, cell: tuple[int, int]) -> float:
@@ -690,9 +756,18 @@ class BattlefieldEnv:
 
     def _build_global_features(self) -> np.ndarray:
         relative_goal = (self.goal_position - self.agent_position).astype(np.float32) / self.grid_size
-        relative_enemy = (self.enemy_position[:2] - self.agent_position.astype(np.float32)) / self.grid_size
+
+        if self.current_scenario_mode == "full_map" and self.full_terrain is not None:
+            ox, oy = self.window_offset
+            agent_global = self.agent_position.astype(np.float32) + np.array((float(oy), float(ox)), dtype=np.float32)
+            norm = float(max(self.full_terrain.full_height, self.full_terrain.full_width))
+            relative_enemy = (self.enemy_position[:2] - agent_global) / norm
+            enemy_distance = np.array([np.linalg.norm(self.enemy_position[:2] - agent_global) / norm], dtype=np.float32)
+        else:
+            relative_enemy = (self.enemy_position[:2] - self.agent_position.astype(np.float32)) / self.grid_size
+            enemy_distance = np.array([np.linalg.norm(relative_enemy)], dtype=np.float32)
+
         goal_distance = np.array([self._goal_distance(self.agent_position) / self.grid_size], dtype=np.float32)
-        enemy_distance = np.array([np.linalg.norm(relative_enemy)], dtype=np.float32)
         enemy_forward = self.enemy_forward.astype(np.float32)
         current_visibility = np.array([self.visibility_map[tuple(self.agent_position)]], dtype=np.float32)
         hidden_ratio = np.array([self.hidden_ratio], dtype=np.float32)

@@ -2,7 +2,15 @@
   "permissions": {
     "allow": [
       "Bash(python -c ' *)",
-      "Bash(iconv -f gbk -t utf-8)"
+      "Bash(iconv -f gbk -t utf-8)",
+      "Bash(python env/enemy_search.py)",
+      "Bash(python -c \"import sys; print\\('\\\\n'.join\\(sys.path\\)\\)\")",
+      "Bash(PYTHONPATH=\".\" python env/enemy_search.py)",
+      "Bash(timeout 30 tail -f \"C:\\\\WINDOWS\\\\TEMP\\\\claude\\\\d-----Documents------temp\\\\5ef2378f-56b8-411b-a6b0-33cf811c6127\\\\tasks\\\\boehb4yh8.output\")",
+      "Bash(tasklist //FI \"IMAGENAME eq python.exe\")",
+      "Bash(tasklist.exe /FI \"IMAGENAME eq python.exe\")",
+      "Bash(PYTHONPATH=\".\" python -u env/enemy_search.py)",
+      "Bash(python -c \"import scipy; print\\(scipy.__version__\\)\")"
     ]
   }
 }

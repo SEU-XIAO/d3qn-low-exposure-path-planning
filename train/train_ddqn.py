@@ -45,7 +45,7 @@ def train(config: TrainingConfig | None = None) -> None:
     try:
         for episode in range(1, config.episodes + 1):
             train_scene_seed = rng.choice(env.config.train_scene_seeds)
-            observation = env.reset(scene_seed=train_scene_seed, scenario_mode="random")
+            observation = env.reset(scene_seed=train_scene_seed, scenario_mode=env.config.scenario_mode)
             agent.reset_episode_stats()
             done = False
             episode_reward = 0.0
@@ -100,7 +100,7 @@ def train(config: TrainingConfig | None = None) -> None:
                     agent,
                     env,
                     scene_seeds=env.config.val_scene_seeds[: config.early_stop_eval_episodes],
-                    scenario_mode="random",
+                    scenario_mode=env.config.scenario_mode,
                     log_fn=log,
                 )
 
@@ -112,7 +112,7 @@ def train(config: TrainingConfig | None = None) -> None:
                         agent,
                         env,
                         scene_seeds=env.config.val_scene_seeds,
-                        scenario_mode="random",
+                        scenario_mode=env.config.scenario_mode,
                         log_fn=log,
                     )
                     log(
