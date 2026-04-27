@@ -283,6 +283,7 @@ class DoubleDQNAgent:
         checkpoint = torch.load(path, map_location=self.device, weights_only=True)
         self.online_net.load_state_dict(checkpoint["online_state_dict"])
         self.target_net.load_state_dict(checkpoint["target_state_dict"])
-        self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        if "optimizer_state_dict" in checkpoint:
+            self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         self.training_steps = int(checkpoint.get("training_steps", 0))
         self.last_loss = float(checkpoint.get("last_loss", 0.0))

@@ -10,11 +10,16 @@ from env.battlefield_env import BattlefieldEnv
 from train.dqn_agent import DoubleDQNAgent, TrainingConfig
 
 
-def train(config: TrainingConfig | None = None) -> None:
+def train(config: TrainingConfig | None = None, bc_pretrain_path: str = "artifacts/ddqn_bc.pt") -> None:
     config = config or TrainingConfig()
     env = BattlefieldEnv()
     agent = DoubleDQNAgent(action_dim=len(BattlefieldEnv.ACTIONS), config=config)
     rng = random.Random(config.seed)
+
+    bc_path = Path(bc_pretrain_path)
+    if bc_path.exists():
+        agent.load(str(bc_path))
+        print(f"已加载 BC 预训练权重: {bc_path}")
 
     output_dir = Path(__file__).resolve().parents[1] / "artifacts"
     output_dir.mkdir(parents=True, exist_ok=True)
