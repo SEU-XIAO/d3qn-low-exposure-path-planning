@@ -7,23 +7,6 @@ from torch import nn
 from config import ModelConfig
 
 
-class ResBlock(nn.Module):
-    """残差块：Conv + BN + ReLU + Conv + BN，跳跃连接后 ReLU。"""
-
-    def __init__(self, channels: int) -> None:
-        super().__init__()
-        self.conv1 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
-        self.bn1 = nn.BatchNorm2d(channels)
-        self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
-        self.bn2 = nn.BatchNorm2d(channels)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        identity = x
-        out = torch.relu(self.bn1(self.conv1(x)))
-        out = self.bn2(self.conv2(out))
-        return torch.relu(identity + out)
-
-
 class HybridPolicyNetwork(nn.Module):
     def __init__(self, action_dim: int, config: ModelConfig | None = None) -> None:
         super().__init__()
@@ -37,18 +20,14 @@ class HybridPolicyNetwork(nn.Module):
             nn.Conv2d(32, 32, kernel_size=3, padding=1),
             nn.ReLU(),
             nn.MaxPool2d(kernel_size=2),
-            ResBlock(32),
             # Stage 2: 32×25×25 → 64×12×12
             nn.Conv2d(32, 64, kernel_size=3, padding=1),
             nn.ReLU(),
             nn.Conv2d(64, 64, kernel_size=3, padding=1),
             nn.ReLU(),
             nn.MaxPool2d(kernel_size=2),
-            ResBlock(64),
             # Stage 3: 64×12×12 → 128×6×6 → global pool
             nn.Conv2d(64, 128, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(128, 128, kernel_size=3, padding=1),
             nn.ReLU(),
             nn.AdaptiveAvgPool2d((4, 4)),
             nn.Flatten(),

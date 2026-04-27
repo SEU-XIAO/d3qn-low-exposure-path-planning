@@ -142,13 +142,13 @@ class TrainingDefaults:
     # 折扣因子。
     gamma: float = 0.99
     # 学习率。
-    learning_rate: float = 3e-5
+    learning_rate: float = 1e-4
     # 目标网络更新间隔（步数）。
     target_update_interval: int = 500
     # 预热步数（达到后开始训练）。
     warmup_steps: int = 5000
     # 训练频率（每隔多少步更新一次）。
-    train_frequency: int = 1
+    train_frequency: int = 4
     # epsilon-greedy 起始值。
     epsilon_start: float = 1.0
     # epsilon-greedy 结束值。
