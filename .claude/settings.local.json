@@ -22,7 +22,8 @@
       "Bash(python -c \"import py_compile; py_compile.compile\\('config.py', doraise=True\\); py_compile.compile\\('models/policy_network.py', doraise=True\\); py_compile.compile\\('env/battlefield_env.py', doraise=True\\); print\\('All files compile OK'\\)\")",
       "Bash(python -c \"import py_compile; py_compile.compile\\('env/battlefield_env.py', doraise=True\\); print\\('OK'\\)\")",
       "Bash(python -c \"import sys; sys.path.insert\\(0, '.'\\); from train.bc_pretrain import generate_expert_data, train_bc, save_bc_checkpoint; print\\('BC pretrain module OK'\\)\")",
-      "Bash(python -c \"import sys; sys.path.insert\\(0, '.'\\); from train.train_ddqn import train; print\\('train_ddqn module OK'\\)\")"
+      "Bash(python -c \"import sys; sys.path.insert\\(0, '.'\\); from train.train_ddqn import train; print\\('train_ddqn module OK'\\)\")",
+      "Bash(python -c \"from train.bc_pretrain import generate_expert_data; print\\('OK'\\)\")"
     ]
   }
 }

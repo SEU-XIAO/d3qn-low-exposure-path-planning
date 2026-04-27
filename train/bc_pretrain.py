@@ -28,10 +28,11 @@ def generate_expert_data(episodes: int = 2000) -> list[dict[str, np.ndarray]]:
     config = EnvConfig()
     env = BattlefieldEnv(config)
     dataset: list[dict[str, np.ndarray]] = []
+    path_count = 0
 
     print(f"生成专家数据 (目标 {episodes} 条路径)...")
     for seed in range(1000, 1000 + episodes * 3):
-        if len(dataset) >= episodes:
+        if path_count >= episodes:
             break
         try:
             obs = env.reset(scene_seed=seed, scenario_mode="full_map")
@@ -60,8 +61,10 @@ def generate_expert_data(episodes: int = 2000) -> list[dict[str, np.ndarray]]:
                 "action": action,
             })
 
+        path_count += 1
+
         if len(dataset) % 5000 == 0 or (len(dataset) > 0 and len(dataset) <= 100):
-            print(f"  已收集 {len(dataset)} 个状态-动作对 ({len([d for d in dataset])} / {episodes} 条路径)")
+            print(f"  已收集 {len(dataset)} 个状态-动作对 ({path_count} / {episodes} 条路径)")
 
     print(f"专家数据生成完成: {len(dataset)} 个样本")
     return dataset
