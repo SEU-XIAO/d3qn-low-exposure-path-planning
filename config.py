@@ -87,6 +87,8 @@ class EnvConfig:
 
     # 每一步基础惩罚，鼓励更短路径。
     step_penalty: float = 0.05
+    # 向目标靠近的稠密奖励权重（小值，仅提供方向信号）。
+    progress_weight: float = 0.05
     # 处在可见区域的额外惩罚系数。0.4 意味着走 2~3 步暴露格子 ≈ 多走 1 步，允许必要时的短暂暴露。
     visible_penalty: float = 0.4
     # 到达目标的终点奖励。

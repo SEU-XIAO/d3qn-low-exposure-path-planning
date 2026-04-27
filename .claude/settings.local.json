@@ -23,7 +23,8 @@
       "Bash(python -c \"import py_compile; py_compile.compile\\('env/battlefield_env.py', doraise=True\\); print\\('OK'\\)\")",
       "Bash(python -c \"import sys; sys.path.insert\\(0, '.'\\); from train.bc_pretrain import generate_expert_data, train_bc, save_bc_checkpoint; print\\('BC pretrain module OK'\\)\")",
       "Bash(python -c \"import sys; sys.path.insert\\(0, '.'\\); from train.train_ddqn import train; print\\('train_ddqn module OK'\\)\")",
-      "Bash(python -c \"from train.bc_pretrain import generate_expert_data; print\\('OK'\\)\")"
+      "Bash(python -c \"from train.bc_pretrain import generate_expert_data; print\\('OK'\\)\")",
+      "Bash(python -c \"from config import EnvConfig; c=EnvConfig\\(\\); assert hasattr\\(c, 'progress_weight'\\); print\\(f'progress_weight={c.progress_weight}'\\); from env.battlefield_env import BattlefieldEnv; print\\('OK'\\)\")"
     ]
   }
 }

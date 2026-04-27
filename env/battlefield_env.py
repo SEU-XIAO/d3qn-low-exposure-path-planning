@@ -137,6 +137,7 @@ class BattlefieldEnv:
             collision = True
             self.consecutive_collisions += 1
         else:
+            prev_dist = self._goal_distance(self.agent_position)
             self.agent_position = candidate
             self.consecutive_collisions = 0
             current_visibility = float(self.visibility_map[tuple(self.agent_position)])
@@ -144,6 +145,8 @@ class BattlefieldEnv:
             self.visible_path_length += move_cost * current_visibility
             self.hidden_path_length += move_cost * (1.0 - current_visibility)
             reward -= self.config.visible_penalty * move_cost * current_visibility
+            cur_dist = self._goal_distance(self.agent_position)
+            reward += (prev_dist - cur_dist) * self.config.progress_weight
 
         current_hidden_ratio = self.hidden_ratio
 

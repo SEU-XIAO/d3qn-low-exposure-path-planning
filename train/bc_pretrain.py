@@ -39,7 +39,7 @@ def generate_expert_data(episodes: int = 2000) -> list[dict[str, np.ndarray]]:
         except RuntimeError:
             continue
 
-        planner = VisibilityAwareAStarPlanner(env, visible_weight=8.0)
+        planner = VisibilityAwareAStarPlanner(env, visible_weight=3.0)
         result = planner.plan()
         if not result.success or len(result.path) < 2:
             continue
