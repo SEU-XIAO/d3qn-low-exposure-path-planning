@@ -262,39 +262,28 @@ class BattlefieldEnv:
 
     def _sample_start_goal_in_window(self, rng: np.random.Generator) -> tuple[tuple[int, int], tuple[int, int]]:
         corner_span = 5
-        gs = self.grid_size
-        g0 = max(0, gs - corner_span)
+        start_pool = [(x, y) for x in range(min(corner_span, self.grid_size))
+                      for y in range(min(corner_span, self.grid_size))
+                      if self.window_tag_map is not None and self.window_tag_map[x, y] == 0]
+        g0 = max(0, self.grid_size - corner_span)
+        goal_pool = [(x, y) for x in range(g0, self.grid_size)
+                     for y in range(g0, self.grid_size)
+                     if self.window_tag_map is not None and self.window_tag_map[x, y] == 0]
 
-        corner_regions = [
-            ("tl", 0, min(corner_span, gs), 0, min(corner_span, gs)),
-            ("tr", 0, min(corner_span, gs), g0, gs),
-            ("bl", g0, gs, 0, min(corner_span, gs)),
-            ("br", g0, gs, g0, gs),
-        ]
+        if not start_pool:
+            start_pool = [(0, 0)]
+        if not goal_pool:
+            goal_pool = [(self.grid_size - 1, self.grid_size - 1)]
 
-        idx = list(rng.permutation(4))
-        for si, gi in ((idx[0], idx[1]), (idx[0], idx[2]), (idx[0], idx[3]),
-                        (idx[1], idx[2]), (idx[1], idx[3]), (idx[2], idx[3])):
-            _, sx0, sx1, sy0, sy1 = corner_regions[si]
-            _, gx0, gx1, gy0, gy1 = corner_regions[gi]
-
-            start_pool = [(x, y) for x in range(sx0, sx1) for y in range(sy0, sy1)
-                          if self.window_tag_map is not None and self.window_tag_map[x, y] == 0]
-            goal_pool = [(x, y) for x in range(gx0, gx1) for y in range(gy0, gy1)
-                         if self.window_tag_map is not None and self.window_tag_map[x, y] == 0]
-
-            if not start_pool or not goal_pool:
+        for _ in range(512):
+            s = start_pool[int(rng.integers(0, len(start_pool)))]
+            g = goal_pool[int(rng.integers(0, len(goal_pool)))]
+            if s == g:
                 continue
-
-            for _ in range(128):
-                s = start_pool[int(rng.integers(0, len(start_pool)))]
-                g = goal_pool[int(rng.integers(0, len(goal_pool)))]
-                if s == g:
-                    continue
-                dist = np.linalg.norm(np.array(s, dtype=np.float32) - np.array(g, dtype=np.float32))
-                if dist < self.config.min_start_goal_distance:
-                    continue
-                return s, g
+            dist = np.linalg.norm(np.array(s, dtype=np.float32) - np.array(g, dtype=np.float32))
+            if dist < self.config.min_start_goal_distance:
+                continue
+            return s, g
 
         return tuple(self.config.start), tuple(self.config.goal)
 
