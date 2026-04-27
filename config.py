@@ -143,12 +143,12 @@ class TrainingDefaults:
     replay_capacity: int = 100000
     # 折扣因子。
     gamma: float = 0.99
-    # 学习率。
-    learning_rate: float = 1e-4
+    # 学习率（BC 预训练后微调，降低两个数量级防遗忘）。
+    learning_rate: float = 1e-5
     # 目标网络更新间隔（步数）。
     target_update_interval: int = 500
-    # 预热步数（达到后开始训练）。
-    warmup_steps: int = 5000
+    # 预热步数（BC 预训练后减少随机探索污染）。
+    warmup_steps: int = 1000
     # 训练频率（每隔多少步更新一次）。
     train_frequency: int = 4
     # epsilon-greedy 起始值。
@@ -163,8 +163,8 @@ class TrainingDefaults:
     full_eval_interval: int = 200
     # 保存间隔（每隔多少 episode 保存一次）。
     save_interval: int = 100
-    # 梯度裁剪最大范数。
-    max_gradient_norm: float = 5.0
+    # 梯度裁剪最大范数（收紧以配合 BC 微调）。
+    max_gradient_norm: float = 1.0
     # 随机种子（影响训练可重复性）。
     seed: int = 42
     # 探索相关配置集合。
