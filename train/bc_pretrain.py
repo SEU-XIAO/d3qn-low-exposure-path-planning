@@ -153,7 +153,7 @@ def main() -> None:
     cache_path = Path(args.data_cache)
     if cache_path.exists():
         print(f"加载缓存的专家数据: {cache_path}")
-        raw = torch.load(cache_path, map_location="cpu", weights_only=True)
+        raw = torch.load(cache_path, map_location="cpu", weights_only=False)
         dataset = [{"local_map": lm, "global_features": gf, "action": int(a)}
                    for lm, gf, a in zip(raw["local_maps"], raw["global_features"], raw["actions"])]
     else:
