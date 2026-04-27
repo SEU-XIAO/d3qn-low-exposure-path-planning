@@ -146,28 +146,9 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=512)
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--output", type=str, default="artifacts/ddqn_bc.pt")
-    parser.add_argument("--data-cache", type=str, default="artifacts/expert_data.pt",
-                        help="缓存专家数据的路径（若存在则跳过生成）")
     args = parser.parse_args()
 
-    cache_path = Path(args.data_cache)
-    if cache_path.exists():
-        print(f"加载缓存的专家数据: {cache_path}")
-        raw = torch.load(cache_path, map_location="cpu", weights_only=False)
-        dataset = [{"local_map": lm, "global_features": gf, "action": int(a)}
-                   for lm, gf, a in zip(raw["local_maps"], raw["global_features"], raw["actions"])]
-    else:
-        dataset = generate_expert_data(args.episodes)
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        torch.save(
-            {
-                "local_maps": np.stack([d["local_map"] for d in dataset]),
-                "global_features": np.stack([d["global_features"] for d in dataset]),
-                "actions": np.array([d["action"] for d in dataset], dtype=np.int64),
-            },
-            cache_path,
-        )
-        print(f"专家数据缓存至: {cache_path}")
+    dataset = generate_expert_data(args.episodes)
 
     net = train_bc(dataset, epochs=args.epochs, lr=args.lr,
                    batch_size=args.batch_size, device=args.device)
