@@ -81,7 +81,7 @@ horizontal_distance = cell_size（直走 10m）或 cell_size * sqrt(2)（对角�
 
 | 组件 | 结构 | 说明 |
 |------|------|------|
-| 局部编码器 | 3-stage CNN: 5→32→64→128, 2×MaxPool, 2×ResBlock, AdaptiveAvgPool(4×4), Flatten → 2048 | 处理 5×50×50 局部特征图，残差块稳定深层梯度 |
+| 局部编码器 | 3-stage CNN: 5→32→64→128, 2×MaxPool, 2×ResBlock(含BN), AdaptiveAvgPool(4×4), Flatten → 2048 | 处理 5×50×50 局部特征图，BatchNorm + 残差连接稳定深层训练 |
 | 全局编码器 | Linear(8→64→64) | 处理全局标量特征 |
 | 融合层 | Concat(2048+64) → Linear(128) | |
 | Value 头 | Linear(128→64→1) | Dueling V(s) |
@@ -112,11 +112,11 @@ horizontal_distance = cell_size（直走 10m）或 cell_size * sqrt(2)（对角�
 | batch_size | 256 | |
 | replay_capacity | 100000 | 经验回放缓冲区大小（uint8 存储，~2GB） |
 | gamma | 0.99 | 折扣因子 |
-| lr | 1e-4 | 学习率 |
+| lr | 3e-5 | 学习率（深网络需要更低lr防loss爆炸） |
 | target_update | 每 500 步 | Double DQN 目标网络同步 |
 | epsilon | 1.0 → 0.05 | 20 万步线性衰减（含 heuristic/teacher/lambda） |
 | enemy_switch_interval | 50 | 同一敌人固定 50 个 episode 后切换 |
-| warmup | 2000 步 | 预热后才开始训练 |
+| warmup | 5000 步 | 预热后才开始训练（深网络需要更多样经验） |
 
 ### 4.2 探索策略
 
@@ -124,9 +124,9 @@ horizontal_distance = cell_size（直走 10m）或 cell_size * sqrt(2)（对角�
 |------|---------------------|------|
 | ε-greedy | 1.0 → 0.05 | 标准随机探索（20 万步衰减） |
 | Heuristic Subset | 0.50 → 0.20 | 偏向朝目标方向移动的动作子集 |
-| Teacher (A*) | 0.25 → 0.08 | Visibility-A* 规划路径推荐下一步，λ 从 12.0 衰减到 3.0 |
+| Teacher (A*) | 0.12 → 0.03 | Visibility-A* 规划路径推荐下一步，λ 从 12.0 衰减到 3.0 |
 
-引导探索概率和 Teacher λ 随训练线性衰减（与 epsilon 共用 20 万步衰减表）。前期 λ=12.0 极度保守，后期 λ=3.0 教会 Agent 接受必要暴露（Agent 实际奖励比 visible/step ≈ 8.0，λ 范围需覆盖两侧）。同一敌人固定 50 个 episode 才切换，减少可见性分布震荡。
+引导探索概率和 Teacher λ 随训练线性衰减（与 epsilon 共用 20 万步衰减表）。前期 λ=12.0 极度保守，后期 λ=3.0 教会 Agent 接受必要暴露。Teacher 概率大幅降低（0.12→0.03），让 Agent 尽早自主学习而非依赖引导。同一敌人固定 50 个 episode 才切换，减少可见性分布震荡。
 
 ### 4.3 奖励设计
 
@@ -266,8 +266,8 @@ scp artifacts/enemy_pool.json artifacts/visibility_maps.npz user@remote:project/
 |--------|-------------------|
 | `EnvConfig` | `scenario_mode="full_map"`, `grid_size=50`, `max_steps=200`, `max_climb_tan=0.3`, `visible_penalty=0.4`, `enemy_switch_interval=50`, `max_consecutive_collisions=15` |
 | `ModelConfig` | `local_channels=5`, `global_feature_dim=8` |
-| `ExplorationConfig` | `heuristic_subset_enabled=True`, `teacher_enabled=True`, `teacher_lambda_start=12.0→end=3.0` |
-| `TrainingDefaults` | `episodes=10000`, `batch_size=256`, `replay_capacity=100000`, `lr=1e-4`, `gamma=0.99`, `epsilon_decay_steps=200000` |
+| `ExplorationConfig` | `heuristic_subset_enabled=True`, `teacher_enabled=True`, `teacher_lambda_start=12.0→end=3.0`, `teacher_action_prob=0.12→0.03` |
+| `TrainingDefaults` | `episodes=10000`, `batch_size=256`, `replay_capacity=100000`, `lr=3e-5`, `warmup=5000`, `gamma=0.99`, `epsilon_decay_steps=200000` |
 
 ---
 

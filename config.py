@@ -120,9 +120,9 @@ class ExplorationConfig:
     # 是否启用 teacher 动作（A* 引导）。
     teacher_enabled: bool = True
     # teacher 动作的起始使用概率。
-    teacher_action_prob_start: float = 0.25
+    teacher_action_prob_start: float = 0.12
     # teacher 动作的结束使用概率。
-    teacher_action_prob_end: float = 0.08
+    teacher_action_prob_end: float = 0.03
     # Teacher Visibility-A* 的 λ 起始值（可见性权重）。
     teacher_lambda_start: float = 12.0
     # Teacher Visibility-A* 的 λ 结束值。
@@ -142,11 +142,11 @@ class TrainingDefaults:
     # 折扣因子。
     gamma: float = 0.99
     # 学习率。
-    learning_rate: float = 1e-4
+    learning_rate: float = 3e-5
     # 目标网络更新间隔（步数）。
     target_update_interval: int = 500
     # 预热步数（达到后开始训练）。
-    warmup_steps: int = 2000
+    warmup_steps: int = 5000
     # 训练频率（每隔多少步更新一次）。
     train_frequency: int = 1
     # epsilon-greedy 起始值。
