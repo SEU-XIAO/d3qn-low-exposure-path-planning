@@ -10,7 +10,16 @@
       "Bash(tasklist //FI \"IMAGENAME eq python.exe\")",
       "Bash(tasklist.exe /FI \"IMAGENAME eq python.exe\")",
       "Bash(PYTHONPATH=\".\" python -u env/enemy_search.py)",
-      "Bash(python -c \"import scipy; print\\(scipy.__version__\\)\")"
+      "Bash(python -c \"import scipy; print\\(scipy.__version__\\)\")",
+      "Bash(PYTHONPATH=\".\" python eval/count.py MyPath_Data417.txt)",
+      "Bash(python -c \"import py_compile; py_compile.compile\\('config.py', doraise=True\\); print\\('config.py OK'\\)\")",
+      "Bash(python -c \"import py_compile; py_compile.compile\\('env/battlefield_env.py', doraise=True\\); print\\('battlefield_env.py OK'\\)\")",
+      "Bash(python -c \"import py_compile; py_compile.compile\\('visualize/plot_scene.py', doraise=True\\); print\\('plot_scene.py OK'\\)\")",
+      "Bash(python -c \"import py_compile; py_compile.compile\\('visualize/plot_episode.py', doraise=True\\); print\\('plot_episode.py OK'\\)\")",
+      "Bash(python -c \"import py_compile; py_compile.compile\\('train/dqn_agent.py', doraise=True\\); print\\('dqn_agent.py OK'\\)\")",
+      "Bash(PYTHONPATH=\".\" python -c \"from env.battlefield_env import BattlefieldEnv; from config import EnvConfig, ExplorationConfig, TrainingDefaults; c = EnvConfig\\(\\); print\\(f'max_steps={c.max_steps}, timeout={c.timeout_penalty}, step={c.step_penalty}, visible={c.visible_penalty}, switch_interval={c.enemy_switch_interval}'\\); e = ExplorationConfig\\(\\); print\\(f'teacher_prob={e.teacher_action_prob_start}->{e.teacher_action_prob_end}, lambda={e.teacher_lambda_start}->{e.teacher_lambda_end}'\\); t = TrainingDefaults\\(\\); print\\(f'epsilon_decay={t.epsilon_decay_steps}'\\)\")",
+      "Bash(python -c \"import py_compile; py_compile.compile\\('train/replay_buffer.py', doraise=True\\); print\\('replay_buffer.py OK'\\)\")",
+      "Bash(python -c \"import py_compile; py_compile.compile\\('config.py', doraise=True\\); py_compile.compile\\('models/policy_network.py', doraise=True\\); py_compile.compile\\('env/battlefield_env.py', doraise=True\\); print\\('All files compile OK'\\)\")"
     ]
   }
 }

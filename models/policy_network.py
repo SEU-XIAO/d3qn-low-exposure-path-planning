@@ -7,6 +7,21 @@ from torch import nn
 from config import ModelConfig
 
 
+class ResBlock(nn.Module):
+    """简单的残差块：两个 3×3 卷积 + ReLU + 跳跃连接。"""
+
+    def __init__(self, channels: int) -> None:
+        super().__init__()
+        self.conv = nn.Sequential(
+            nn.Conv2d(channels, channels, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(channels, channels, kernel_size=3, padding=1),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.relu(x + self.conv(x))
+
+
 class HybridPolicyNetwork(nn.Module):
     def __init__(self, action_dim: int, config: ModelConfig | None = None) -> None:
         super().__init__()
@@ -14,12 +29,24 @@ class HybridPolicyNetwork(nn.Module):
         self.action_dim = action_dim
 
         self.local_encoder = nn.Sequential(
-            nn.Conv2d(self.config.local_channels, 16, kernel_size=3, padding=1),
+            # Stage 1: 5×50×50 → 32×25×25
+            nn.Conv2d(self.config.local_channels, 32, kernel_size=3, padding=1),
             nn.ReLU(),
-            nn.Conv2d(16, 32, kernel_size=3, padding=1),
+            nn.Conv2d(32, 32, kernel_size=3, padding=1),
             nn.ReLU(),
             nn.MaxPool2d(kernel_size=2),
+            ResBlock(32),
+            # Stage 2: 32×25×25 → 64×12×12
             nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(64, 64, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2),
+            ResBlock(64),
+            # Stage 3: 64×12×12 → 128×6×6 → global pool
+            nn.Conv2d(64, 128, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(128, 128, kernel_size=3, padding=1),
             nn.ReLU(),
             nn.AdaptiveAvgPool2d((4, 4)),
             nn.Flatten(),
@@ -33,7 +60,7 @@ class HybridPolicyNetwork(nn.Module):
         )
 
         self.fusion = nn.Sequential(
-            nn.Linear(64 * 16 + 64, 128),
+            nn.Linear(128 * 16 + 64, 128),
             nn.ReLU(),
         )
 

@@ -44,14 +44,15 @@ class ReplayBuffer:
             next_mask = np.zeros((self.action_dim,), dtype=np.float32)
             if next_valid_actions:
                 next_mask[next_valid_actions] = 1.0
+        # local_map 四通道全在 [0,1] 范围内，用 uint8 存储节省 4× 内存
         self.buffer.append(
             Transition(
-                local_map=local_map.copy(),
-                global_features=global_features.copy(),
+                local_map=(local_map * 255.0).clip(0, 255).astype(np.uint8),
+                global_features=global_features.astype(np.float32).copy(),
                 action=action,
                 reward=reward,
-                next_local_map=next_local_map.copy(),
-                next_global_features=next_global_features.copy(),
+                next_local_map=(next_local_map * 255.0).clip(0, 255).astype(np.uint8),
+                next_global_features=next_global_features.astype(np.float32).copy(),
                 next_valid_action_mask=next_mask,
                 done=float(done),
             )
@@ -60,11 +61,11 @@ class ReplayBuffer:
     def sample(self, batch_size: int) -> dict[str, np.ndarray]:
         batch = random.sample(self.buffer, batch_size)
         payload: dict[str, np.ndarray] = {
-            "local_map": np.stack([item.local_map for item in batch], axis=0).astype(np.float32),
+            "local_map": np.stack([item.local_map for item in batch], axis=0).astype(np.float32) / 255.0,
             "global_features": np.stack([item.global_features for item in batch], axis=0).astype(np.float32),
             "action": np.array([item.action for item in batch], dtype=np.int64),
             "reward": np.array([item.reward for item in batch], dtype=np.float32),
-            "next_local_map": np.stack([item.next_local_map for item in batch], axis=0).astype(np.float32),
+            "next_local_map": np.stack([item.next_local_map for item in batch], axis=0).astype(np.float32) / 255.0,
             "next_global_features": np.stack([item.next_global_features for item in batch], axis=0).astype(np.float32),
             "done": np.array([item.done for item in batch], dtype=np.float32),
         }

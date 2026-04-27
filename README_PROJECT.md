@@ -2,220 +2,290 @@
 
 ## 1. 项目概述
 
-本项目解决**敌方视野约束下的双目标路径规划问题**：在 32×32 三维高度场地图上，智能体需要从起点走到终点，同时优化：
+在真实地形高度场（501×499 格，cell=10m）上训练一个 D3QN（Double DQN + Dueling Network）智能体，使其在**敌方视野威胁**下找到从起点到终点的低暴露路径。
 
-- **路径长度**：步数尽量少
-- **隐蔽性**：暴露在敌人视野内的步数尽量少
+**双目标优化**：路径长度尽量短 + 暴露在敌人视野内的步数尽量少。
 
-智能体使用 **D3QN（Double DQN + Dueling Network）** 深度强化学习训练，以 Visibility-A\* 和 Pareto A\* 等经典规划器作为基线对比。
-
----
-
-## 2. 环境与场景
-
-核心环境代码：[env/battlefield_env.py](env/battlefield_env.py)
-
-### 2.1 地图与移动
-
-- 地图尺寸：`32×32`，每个格子具有 `0 ~ height_levels` 的地形高度。
-- 智能体在二维网格上做 **8 邻域离散移动**（上下左右 + 四个对角）。
-- 上坡约束：仅当 `to_height - from_height <= agent_max_climb_height` 时可进入目标格。
-- 敌人所在格子为硬障碍，不可通行。
-
-### 2.2 随机场景生成
-
-- **地形**：高度场 + 稀疏障碍凸起（伯努利采样，`obstacle_probability = 0.06`），形成可爬坡但非平坦地形。
-- **敌人瞭望点优化**：在指定区域条带内搜索使可见面积最大的敌人位置与朝向。
-  - 两步筛选：粗采样 → 精评估（含完整 3D 遮挡射线）。
-  - 朝向离散化为 `heading_bins` 个角度（默认 12，即每 30° 一个方向）。
-- **敌人区域**：限制在地图一侧的 `8×32` 条带内，可通过 `enemy_region_width/enemy_region_side` 配置。
-- **起点/终点**：与敌人保持最小距离约束，避免开局贴脸或目标过于暴露。
-- 支持固定场景（`scenario_mode = "fixed"`）与随机场景（`"random"`，训练默认）。
-
-### 2.3 统计指标
-
-环境统计以下指标：`total_path_length`、`visible_path_length`、`hidden_path_length`、`hidden_ratio`、`visible_ratio`。
+核心思路：**从全图 25 万格子中用特征代理选出 8 个瞭望点，预计算全图二值可见性底图，训练时随机滑窗切片即可**——无需每 episode 做射线追踪。
 
 ---
 
-## 3. 可见性建模（3D 视线遮挡）
+## 2. 关键设计决策
 
-`visibility_map[x, y]` ∈ {0, 1} 表示该格是否被敌人看见。
+### 2.1 敌人选点：地形特征代理 + 空间抑制
 
-使用**三维射线检测**：
+**问题**：如何在 501×499 的全局地形中选出 8 个视野尽量好、覆盖尽量广的敌人瞭望点？
 
-- 敌人站在自身格子的地形高度上（`enemy_eye_height` 偏移），目标格视点设在 `target_visibility_height` 高度。
-- 从敌人视点到目标格视点连线，每格采样 `line_of_sight_samples_per_cell` 个点。
-- 若连线中间有任何格子的地形高度超过连线高度（含 `visibility_occluder_bias` 偏置），则该目标格**不可见**。
+**方法**（[env/enemy_search.py](env/enemy_search.py)）：
+
+1. **特征代理评分**（全图每个格子，25×25 邻域窗口）：
+   - `height_rank` (0.3)：在邻域内的高度排名 `(h - min) / (max - min)`
+   - `openness` (0.3)：比邻域均值高多少 `(h - mean) / (max - min)`
+   - `dominance` (0.4)：z-score `(h - mean) / std`，衡量局部支配力
+
+2. **空间抑制 (NMS)**：选最高分 → 抑制半径 60 内的得分 ×0.3 → 重复 8 次，确保 8 个点散布全图
+
+3. **验证**：对每个候选点用 3D 射线追踪计算全图可见性格子数
+
+**关键洞察**：平原上一棵 19m 的孤立树（可见 9.4% ≈ 23624 格）比山区 89m 的山峰（可见 3.2% ≈ 8092 格）视野更好——**局部支配力远比绝对高度重要**。
+
+### 2.2 预计算全图可见性 → 训练时切片
+
+**流程**：
+
+- **一次性**：对 8 个敌人池位置各跑一次全图 3D 射线追踪（每个点 501×499 ≈ 25 万次射线），存为 `artifacts/visibility_maps.npz`（68 KB）
+- **每 episode（训练时）**：从敌人池随机选一个敌人 → 取对应全图可见性底图 → 随机切出 50×50 窗口（numpy 切片，~40ms）
+- **每 episode（评估时）**：对 20 个固定种子取确定性窗口切片
+
+**收益**：训练 reset 从 200ms（现场射线追踪）降至 40ms（numpy 切片），且敌人位置不再局限于窗口内。
+
+### 2.3 敌人全局坐标
+
+敌人位置是**全局坐标系**（在全图 501×499 中），独立于随机切出的 50×50 训练窗口。敌人可以——且经常——在窗口之外。这意味着：
+
+- 敌人高度 = 该格子的地形高度（tag 可以是地面/建筑/树木，不限于可通行）
+- 可见性判断使用全局坐标进行 3D 射线追踪
+- 如果敌人恰好在 50×50 窗口内，其所在格子是否阻挡智能体移动由 `tag_map` 决定（可通行则可行走）
+
+### 2.4 爬坡约束：Tan 公式
+
+旧版用 `agent_max_climb_height`（固定高度差阈值），新版用基于梯度的判断：
+
+```
+tan = dh / horizontal_distance
+horizontal_distance = cell_size（直走 10m）或 cell_size * sqrt(2)（对角线 14.14m）
+可通行 ⇔ tan <= max_climb_tan (0.3)
+```
+
+即直走最多爬 3m，对角线最多爬 4.24m。这个约束通过**动作掩码**强制（Q 值再高也不能选不可通行的动作）。
+
+### 2.5 360° 全向可见性
+
+敌人可见性为**全向 360°**——无 FOV 锥角限制，无最大距离限制。任何格子的可见性完全由 3D 地形遮挡决定。
+
+### 2.6 3D 视线检测
+
+```
+敌人视点 = 地形高度 + enemy_eye_height (1.0m)
+目标视点 = 地形高度 + target_visibility_height (0.5m)
+从敌人视点到目标视点连线采样 → 若中间格子地形高度超过连线高度 → 不可见
+```
 
 ---
 
-## 4. 智能体与网络架构
+## 3. 网络架构
 
-模型代码：[models/policy_network.py](models/policy_network.py)，Agent 代码：[train/dqn_agent.py](train/dqn_agent.py)
+模型代码：[models/policy_network.py](models/policy_network.py)
 
-### 4.1 观测空间（Hybrid 输入）
+**Hybrid CNN + MLP + Dueling Head**（Double DQN）：
+
+| 组件 | 结构 | 说明 |
+|------|------|------|
+| 局部编码器 | 3-stage CNN: 5→32→64→128, 2×MaxPool, 2×ResBlock, AdaptiveAvgPool(4×4), Flatten → 2048 | 处理 5×50×50 局部特征图，残差块稳定深层梯度 |
+| 全局编码器 | Linear(8→64→64) | 处理全局标量特征 |
+| 融合层 | Concat(2048+64) → Linear(128) | |
+| Value 头 | Linear(128→64→1) | Dueling V(s) |
+| Advantage 头 | Linear(128→64→8) | Dueling A(s,a) |
+| Q 值 | V + A − mean(A) | |
+
+**输入**（Hybrid）：
 
 | 输入 | 维度 | 说明 |
 |------|------|------|
-| `local_map` | `4 × 32 × 32` | 四通道：occupancy（地形高度）、visibility（可见性）、goal（目标位置）、agent（当前位置） |
-| `global_features` | `10` | 相对目标向量、相对敌人向量、目标/敌人距离、敌人朝向、当前位置可见性、hidden_ratio |
+| `local_map` | `5 × 50 × 50` | occupancy、visibility、goal（one-hot距离图）、agent（one-hot当前位置）、enemy（one-hot敌人位置） |
+| `global_features` | 8 维 | 相对目标向量(2)、相对敌人向量(2，归一化到全图尺寸)、目标/敌人距离(2)、当前位置可见性(1)、hidden_ratio(1) |
 
-### 4.2 网络结构（HybridPolicyNetwork）
-
-- **局部编码器**：3 层 Conv2D（16→32→64 通道），ReLU 激活，MaxPool + AdaptiveAvgPool，输出 1024 维特征。
-- **全局编码器**：2 层全连接（64 维），编码 10 维全局特征。
-- **融合层**：拼接局部与全局特征，经 128 维隐层。
-- **Dueling 头**：分离 Value 流（输出 V(s)）和 Advantage 流（输出 A(s,a)），Q = V + A − mean(A)。
-- **Double DQN**：Online 网络选动作，Target 网络（每 500 步同步）评估 Q 值。
-
-### 4.3 动作空间
-
-8 个离散动作，维度由环境 `BattlefieldEnv.ACTIONS` 统一管理。
-
-### 4.4 动作掩码
-
-训练和推理阶段均对无效动作（不可通行格子）进行掩码（mask 为 −∞），在全连接 DQN 目标计算中也应用掩码，确保不可行动作不影响 Q 值估计。
+**动作空间**：8 个离散方向（上下左右 + 四对角）
 
 ---
 
-## 5. 探索策略
-
-除 ε-greedy 外，引入了两类**引导探索**机制（见 `ExplorationConfig`）：
-
-| 机制 | 初始概率 | 结束概率 | 说明 |
-|------|----------|----------|------|
-| Heuristic Subset（启发式子集） | 0.50 | 0.10 | 偏向选择朝目标方向移动的动作 |
-| Teacher（A\* 引导） | 0.15 | 0.01 | 由 Visibility-A\* 规划完整路径并推荐下一步 |
-
-两者概率随训练逐步衰减，最终将控制权交给学到的策略。
-
----
-
-## 6. 奖励设计
-
-奖励由以下部分组成（见 `EnvConfig`）：
-
-| 组成部分 | 默认值 | 说明 |
-|----------|--------|------|
-| `step_penalty` | 0.08 | 每步基础惩罚，鼓励更短路径 |
-| `visible_penalty` | 0.8 | 处于可见区域的额外惩罚 |
-| `progress_weight` | 0.75 | 向目标接近的奖励（按距离变化量） |
-| `hidden_ratio_gain_weight` | 0.25 | 隐蔽比例提升奖励（基于 hidden_ratio 增量） |
-| `goal_reward` | 80.0 | 到达终点的奖励 |
-| `success_hidden_ratio_weight` | 2.0 | 成功后按隐蔽比例追加奖励 |
-| `collision_penalty` | 1.0 | 撞墙/无效移动惩罚 |
-| `timeout_penalty` | 40.0 | 超时未达终点惩罚 |
-
----
-
-## 7. 经典规划器（基线）
-
-### 7.1 Visibility-Aware A\*
-
-代码：[planner/visibility_astar.py](planner/visibility_astar.py)
-
-单目标 A\*，最小化代价 `J(p) = L(p) + λ · V(p)`，其中 L 为路径长度，V 为可见步数，λ 默认 6.0。
-
-### 7.2 Weighted / Scalarized A\*
-
-代码：[planner/weighted_astar.py](planner/weighted_astar.py)
-
-Visibility-Aware A\* 的参数化封装，便于调整 λ 权重。
-
-### 7.3 Pareto A\*
-
-代码：[planner/pareto_astar.py](planner/pareto_astar.py)
-
-多目标 A\*，维护每个节点的非支配 `(path_length, visible_path_length)` 标签，通过支配检查和标签剪枝返回 Pareto 前沿上的一组路径（而非单条解）。
-
----
-
-## 8. 训练与评估
-
-### 8.1 训练流程
+## 4. 训练流程
 
 入口：[train/train_ddqn.py](train/train_ddqn.py)
 
-- 使用 `train_scene_seeds`（3500 个场景种子：1000~4499）生成随机场景。
-- 定期在 `val_scene_seeds`（100 个种子：5000~5099）上评估。
-- 按成功率 → 平均奖励的优先级保存最优模型。
-- Early Stop：成功率超过阈值（0.8）但奖励连续 3 个评估周期无显著提升时触发。
-- 支持 KeyboardInterrupt 优雅中断并保存 checkpoint。
+### 4.1 关键训练参数
 
-### 8.2 评估
+| 参数 | 值 | 说明 |
+|------|-----|------|
+| episodes | 10000 | 总训练轮数 |
+| max_steps | 200 | 每 episode 最大步数 |
+| batch_size | 256 | |
+| replay_capacity | 100000 | 经验回放缓冲区大小（uint8 存储，~2GB） |
+| gamma | 0.99 | 折扣因子 |
+| lr | 1e-4 | 学习率 |
+| target_update | 每 500 步 | Double DQN 目标网络同步 |
+| epsilon | 1.0 → 0.05 | 20 万步线性衰减（含 heuristic/teacher/lambda） |
+| enemy_switch_interval | 50 | 同一敌人固定 50 个 episode 后切换 |
+| warmup | 2000 步 | 预热后才开始训练 |
 
-| 脚本 | 用途 |
+### 4.2 探索策略
+
+| 机制 | 初始概率 → 结束概率 | 说明 |
+|------|---------------------|------|
+| ε-greedy | 1.0 → 0.05 | 标准随机探索（20 万步衰减） |
+| Heuristic Subset | 0.50 → 0.20 | 偏向朝目标方向移动的动作子集 |
+| Teacher (A*) | 0.25 → 0.08 | Visibility-A* 规划路径推荐下一步，λ 从 12.0 衰减到 3.0 |
+
+引导探索概率和 Teacher λ 随训练线性衰减（与 epsilon 共用 20 万步衰减表）。前期 λ=12.0 极度保守，后期 λ=3.0 教会 Agent 接受必要暴露（Agent 实际奖励比 visible/step ≈ 8.0，λ 范围需覆盖两侧）。同一敌人固定 50 个 episode 才切换，减少可见性分布震荡。
+
+### 4.3 奖励设计
+
+单步奖励只包含三项核心信号（不含过程性稠密奖励，避免策略畸形）：
+
+| 组成部分 | 默认值 | 说明 |
+|----------|--------|------|
+| `step_penalty` | 0.05 | 每步基础惩罚，乘以移动代价（直走 1.0，对角 1.414） |
+| `visible_penalty` | 0.4 | 暴露在敌人视野内的额外惩罚（0.4 意味着走 2~3 步暴露格子 ≈ 多走 1 步） |
+| `collision_penalty` | 1.0 | 尝试无效动作 |
+| `max_consecutive_collisions` | 15 | 连续撞墙 N 次后提前终止 episode（防止死循环浪费步数） |
+
+Episode 终止时：
+
+| 组成部分 | 默认值 | 说明 |
+|----------|--------|------|
+| `goal_reward` | 100.0 | 到达终点 |
+| `success_hidden_ratio_weight` | 5.0 | 成功后按整体隐蔽比例追加（终局结算，不干扰过程决策） |
+| `timeout_penalty` | 50.0 | 超时未到达 |
+
+**设计原则**：移除了 `progress_weight`（距离差奖励）和 `hidden_ratio_gain_weight`（过程隐蔽比例增益），因为这两个在线稠密奖励会扭曲状态价值估计——前者引发奖励 hacking，后者鼓励 Agent 在隐蔽区反复踱步刷隐蔽率。新奖励格局让"必要时的短暂暴露"可承受，把隐蔽性权衡放在全局层面（终局结算）而非每步恐慌。
+
+### 4.4 动作掩码
+
+每个 step，环境通过 `get_valid_actions()` → `can_move_between()` 返回哪些动作合法（目标格存在、可通行、满足爬坡约束）。非法动作的 Q 值被设为 -inf，确保不会被选中。
+
+### 4.5 评估
+
+- **快速评估**（每 50 episodes）：20 个验证种子，仅记录统计
+- **全量评估**（每 200 episodes）：200 个验证种子，用于模型选择 + early stop
+- 按成功率 → 平均奖励的优先级保存最优模型
+- Early stop：成功率 > 0.8 但奖励连续 3 个周期无显著提升时触发
+
+---
+
+## 5. 经典规划器（基线）
+
+| 规划器 | 文件 | 说明 |
+|--------|------|------|
+| Visibility-Aware A* | [planner/visibility_astar.py](planner/visibility_astar.py) | 最小化代价 `J = L + λ·V`，λ=6.0 |
+| Weighted A* | [planner/weighted_astar.py](planner/weighted_astar.py) | 可调 λ 的 A* 封装 |
+| Pareto A* | [planner/pareto_astar.py](planner/pareto_astar.py) | 多目标 A*，返回 Pareto 前沿上的一组路径 |
+
+---
+
+## 6. 场景模式
+
+在 [config.py](config.py) 中通过 `scenario_mode` 切换：
+
+| 模式 | 说明 |
 |------|------|
-| [eval/run_policy.py](eval/run_policy.py) | 单场景对比：D3QN vs Visibility-A\* |
-| [eval/evaluate_100.py](eval/evaluate_100.py) | 批量评估（默认 1000 场景），导出逐场景统计和汇总到 Excel |
+| `"fixed"` | 固定场景（config 中指定的 start/goal/enemy） |
+| `"random"` | 程序化生成地形 + 随机障碍物 + 区域敌人搜索 |
+| `"full_map"` | **训练默认**：加载真实地形 → 预计算敌人池 → 滑动窗口切片 |
 
 ---
 
-## 9. 可视化
-
-| 脚本 | 功能 |
-|------|------|
-| [visualize/plot_scene.py](visualize/plot_scene.py) | 3D 地形渲染：高度场 bar3d、敌人 FOV 锥体、可见性热力图、起点/终点/敌人标记 |
-| [visualize/plot_episode.py](visualize/plot_episode.py) | Episode 路径渲染：D3QN 路径叠加到 3D 地形和俯视图，支持并排对比 A\* 路径 |
-
----
-
-## 10. 关键默认配置
-
-见 [config.py](config.py) 四个 frozen dataclass：
-
-| 配置类 | 关键参数 |
-|--------|----------|
-| `EnvConfig` | `grid_size=32`, `height_levels=8`, `agent_max_climb_height=1`, `max_steps=96`, `enemy_horizontal_fov_deg=70`, `enemy_max_range=24` |
-| `ModelConfig` | `local_channels=4`, `global_feature_dim=10` |
-| `ExplorationConfig` | `heuristic_subset_enabled=True`, `teacher_enabled=True`, 概率随训练线性衰减 |
-| `TrainingDefaults` | `episodes=10000`, `batch_size=256`, `replay_capacity=300000`, `lr=1e-4`, `gamma=0.99`, `target_update_interval=500`, `epsilon_decay_steps=100000`, `early_stop_success_rate_threshold=0.8` |
-
----
-
-## 11. 项目结构
+## 7. 项目结构
 
 ```
 project/
-  config.py                -- 全部超参数（4 个 frozen dataclass）
-  main.py                  -- 快速冒烟测试入口
+  config.py                  -- 全部超参数（4 个 frozen dataclass）
+  main.py                    -- 快速冒烟测试入口
   env/
-    battlefield_env.py     -- 核心 RL 环境（Gym 风格）
+    battlefield_env.py       -- 核心 RL 环境（Gym 风格, full_map/random/fixed 模式）
+    terrain_loader.py        -- 地形 txt 解析器（(height,tag) 格式）
+    enemy_search.py          -- 三层漏斗敌人搜索 + 全图可见性预计算
   models/
-    policy_network.py      -- D3QN 网络（Hybrid CNN + MLP + Dueling 头）
+    policy_network.py        -- D3QN 网络（Hybrid CNN + MLP + Dueling 头）
   train/
-    dqn_agent.py           -- DoubleDQNAgent（动作选择、训练步、保存/加载）
-    replay_buffer.py       -- 经验回放缓冲（deque 实现）
-    train_ddqn.py          -- 训练循环（评估、Early Stop、Checkpoint）
+    dqn_agent.py             -- DoubleDQNAgent（动作选择、训练步、保存/加载）
+    replay_buffer.py         -- 经验回放缓冲（deque 实现）
+    train_ddqn.py            -- 训练循环（评估、Early Stop、Checkpoint）
   planner/
-    visibility_astar.py    -- Visibility-Aware A* 规划器
-    weighted_astar.py      -- 标量化/加权 A* 封装
-    pareto_astar.py        -- 多目标 Pareto A* 规划器
+    visibility_astar.py      -- Visibility-Aware A* 规划器
+    weighted_astar.py        -- 标量化 A* 封装
+    pareto_astar.py          -- 多目标 Pareto A* 规划器
   eval/
-    run_policy.py          -- 单场景 D3QN vs A* 对比
-    evaluate_100.py        -- 批量评估（Excel 导出）
+    run_policy.py            -- 单场景 D3QN vs A* 对比
+    evaluate_100.py          -- 批量评估（Excel 导出）
+    count.py                 -- 地形文件全面统计分析工具
   visualize/
-    plot_scene.py          -- 3D 场景渲染
-    plot_episode.py        -- Episode 路径可视化
-  artifacts/               -- 已保存模型、日志、评估 Excel 文件
-  docs/                    -- 详细设计文档
+    plot_scene.py            -- 3D 场景渲染
+    plot_episode.py          -- Episode 路径可视化
+  artifacts/                 -- 产出（模型、vis maps、enemy pool、评估结果）
 ```
 
 ---
 
-## 12. 快速开始
+## 8. 快速开始
+
+### 8.1 第一次：预计算敌人池和可见性底图
 
 ```bash
-# 冒烟测试（验证环境与模型可正常初始化）
+# 生成 artifacts/enemy_pool.json 和 artifacts/visibility_maps.npz
+# 耗时约 1 小时（8 个点 × 25 万次射线/点）
+PYTHONPATH="." python -u env/enemy_search.py
+```
+
+### 8.2 训练
+
+```bash
+# 冒烟测试
 python main.py
 
-# 训练 D3QN
+# 正式训练
 python -m train.train_ddqn
+```
 
-# 单场景对比 D3QN vs A*
+### 8.3 分析与评估
+
+```bash
+# 地形统计分析
+python eval/count.py MyPath_Data417.txt
+
+# 单场景对比
 python -m eval.run_policy
 
-# 批量评估并导出 Excel
+# 批量评估
 python -m eval.evaluate_100
 ```
+
+### 8.4 远程训练
+
+如果训练在远程机器上，需要先将预计算文件复制过去：
+```bash
+scp artifacts/enemy_pool.json artifacts/visibility_maps.npz user@remote:project/artifacts/
+```
+
+---
+
+## 9. 配置速查
+
+[config.py](config.py) 四个 frozen dataclass：
+
+| 配置类 | 与训练最相关的参数 |
+|--------|-------------------|
+| `EnvConfig` | `scenario_mode="full_map"`, `grid_size=50`, `max_steps=200`, `max_climb_tan=0.3`, `visible_penalty=0.4`, `enemy_switch_interval=50`, `max_consecutive_collisions=15` |
+| `ModelConfig` | `local_channels=5`, `global_feature_dim=8` |
+| `ExplorationConfig` | `heuristic_subset_enabled=True`, `teacher_enabled=True`, `teacher_lambda_start=12.0→end=3.0` |
+| `TrainingDefaults` | `episodes=10000`, `batch_size=256`, `replay_capacity=100000`, `lr=1e-4`, `gamma=0.99`, `epsilon_decay_steps=200000` |
+
+---
+
+## 10. 地形数据格式
+
+```
+(height,tag);(height,tag);(height,tag);...
+(height,tag);(height,tag);...
+```
+
+每行对应一行格子，用 `;` 分隔。`tag` 含义：
+
+| tag | 含义 | 通行 |
+|-----|------|------|
+| 0 | 地面 | 可通行 |
+| 1 | 建筑 | 不可通行 |
+| 2 | 树木 | 不可通行 |
+
+不规则行（某行格子数少于最大宽度）自动用 `height=0, tag=1` 填充。
+
+当前地形文件 `MyPath_Data417.txt`：501 行 × 499 列，高度范围 0~147，可通行率约 78%，爬坡违反率约 6.8%。

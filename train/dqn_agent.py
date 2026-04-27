@@ -116,7 +116,7 @@ class DoubleDQNAgent:
             global_step,
         )
         if self.exploration.teacher_enabled and random.random() < teacher_prob:
-            teacher_action = self._teacher_action(env)
+            teacher_action = self._teacher_action(env, global_step)
             if teacher_action is not None:
                 return teacher_action, "teacher"
 
@@ -132,10 +132,15 @@ class DoubleDQNAgent:
 
         return random.choice(valid_actions), "random"
 
-    def _teacher_action(self, env: BattlefieldEnv) -> int | None:
+    def _teacher_action(self, env: BattlefieldEnv, global_step: int) -> int | None:
         start = tuple(env.agent_position.tolist())
         goal = tuple(env.goal_position.tolist())
-        result = VisibilityAwareAStarPlanner(env).plan(start=start, goal=goal)
+        teacher_lambda = self._anneal_probability(
+            self.exploration.teacher_lambda_start,
+            self.exploration.teacher_lambda_end,
+            global_step,
+        )
+        result = VisibilityAwareAStarPlanner(env, visible_weight=teacher_lambda).plan(start=start, goal=goal)
         if not result.success or len(result.path) < 2:
             return None
 

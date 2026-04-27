@@ -9,8 +9,8 @@ class EnvConfig:
     height_levels: int = 8
     # 视野输入边长（等于 grid_size 时即为全图）。
     local_map_size: int = 50
-    # 每个 episode 最大步数，上限到达即终止。
-    max_steps: int = 150
+    # 每个 episode 最大步数，上限到达即终止。50×50 地图 + 建筑障碍绕路成本高，200 步给足余量。
+    max_steps: int = 200
 
     # 场景模式："fixed" 固定地图，"random" 随机地图，"full_map" 全图滑动窗口。
     scenario_mode: str = "full_map"
@@ -29,6 +29,8 @@ class EnvConfig:
     enemy_pool_path: str = "artifacts/enemy_pool.json"
     # 敌人位置池大小（训练时从中随机选取，增加场景多样性）。
     enemy_pool_size: int = 8
+    # 敌人切换间隔（episode 数）：同一敌人固定 N 个 episode 再切换，稳定学习信号。
+    enemy_switch_interval: int = 50
 
     # ---- 敌人与可见性 ----
     # 敌人水平视场角（单位：度）。
@@ -45,8 +47,6 @@ class EnvConfig:
     enemy_region_side: str = "north"
     # 全图模式中敌人区域在整个全图的占比（北侧 1/4）。
     enemy_full_region_fraction: float = 0.25
-    # 随机场景中敌人朝向离散角度数量（1 表示不搜索最优朝向，随机选一个）。
-    enemy_heading_bins: int = 1
     # 搜索最佳瞭望点时最多评估的候选敌人站位数量（随机场景模式）。
     enemy_search_max_candidates: int = 150
     # 两阶段搜索中进入精评估（含遮挡射线）的候选数量（随机场景模式）。
@@ -74,42 +74,39 @@ class EnvConfig:
     # 训练用随机场景种子集合。
     train_scene_seeds: tuple[int, ...] = tuple(range(1000, 4500))
     # 验证用随机场景种子集合。
-    val_scene_seeds: tuple[int, ...] = tuple(range(5000, 5100))
+    val_scene_seeds: tuple[int, ...] = tuple(range(5000, 5200))
     # 测试用随机场景种子集合。
-    test_scene_seeds: tuple[int, ...] = tuple(range(6000, 6020))
+    test_scene_seeds: tuple[int, ...] = tuple(range(6000, 6050))
     # 固定场景默认起点（或随机失败时兜底起点）。
     start: tuple[int, int] = (3, 3)
     # 固定场景默认终点（或随机失败时兜底终点）。
     goal: tuple[int, int] = (46, 46)
     # 固定场景敌人位置（或随机场景默认位置）。
     enemy_position: tuple[int, int] = (25, 48)
-    # 敌人朝向向量（会归一化）。
-    enemy_forward: tuple[float, float] = (0.0, -1)
+
 
     # 每一步基础惩罚，鼓励更短路径。
-    step_penalty: float = 0.08
-    # 处在可见区域的额外惩罚系数。
-    visible_penalty: float = 0.8
-    # 向目标接近的奖励权重（按距离变化计算）。
-    progress_weight: float = 0.75
-    # 隐蔽比例提升的奖励权重（基于 hidden_ratio 增量）。
-    hidden_ratio_gain_weight: float = 0.25
+    step_penalty: float = 0.05
+    # 处在可见区域的额外惩罚系数。0.4 意味着走 2~3 步暴露格子 ≈ 多走 1 步，允许必要时的短暂暴露。
+    visible_penalty: float = 0.4
     # 到达目标的终点奖励。
-    goal_reward: float = 80.0
-    # 成功后按隐蔽比例追加的奖励权重。
-    success_hidden_ratio_weight: float = 2.0
+    goal_reward: float = 100.0
+    # 成功后按隐蔽比例追加的奖励权重（终局结算，不干扰过程决策）。
+    success_hidden_ratio_weight: float = 5.0
     # 撞到障碍的惩罚。
     collision_penalty: float = 1.0
+    # 连续撞墙 N 次后终止 episode（避免死循环浪费步数）。
+    max_consecutive_collisions: int = 15
     # 超过最大步数仍未到达终点时的惩罚。
-    timeout_penalty: float = 40.0
+    timeout_penalty: float = 50.0
 
 
 @dataclass(frozen=True)
 class ModelConfig:
-    # 局部/全局输入中的局部通道数（occupancy/visibility/goal/agent）。
-    local_channels: int = 4
+    # 局部/全局输入中的局部通道数（occupancy/visibility/goal/agent/enemy）。
+    local_channels: int = 5
     # 全局特征向量的维度。
-    global_feature_dim: int = 10
+    global_feature_dim: int = 8
 
 
 @dataclass(frozen=True)
@@ -119,13 +116,17 @@ class ExplorationConfig:
     # 启发式子集的起始使用概率。
     heuristic_subset_prob_start: float = 0.50
     # 启发式子集的结束使用概率（随训练衰减）。
-    heuristic_subset_prob_end: float = 0.10
+    heuristic_subset_prob_end: float = 0.20
     # 是否启用 teacher 动作（A* 引导）。
     teacher_enabled: bool = True
     # teacher 动作的起始使用概率。
-    teacher_action_prob_start: float = 0.15
+    teacher_action_prob_start: float = 0.25
     # teacher 动作的结束使用概率。
-    teacher_action_prob_end: float = 0.01
+    teacher_action_prob_end: float = 0.08
+    # Teacher Visibility-A* 的 λ 起始值（可见性权重）。
+    teacher_lambda_start: float = 12.0
+    # Teacher Visibility-A* 的 λ 结束值。
+    teacher_lambda_end: float = 3.0
 
 
 @dataclass(frozen=True)
@@ -136,8 +137,8 @@ class TrainingDefaults:
     episodes: int = 10000
     # 批大小。
     batch_size: int = 256
-    # 经验回放的大小一般在10w-100w之间
-    replay_capacity: int = 300000
+    # 经验回放容量。100k × ~20KB(uint8) ≈ 2GB，远小于原 300k×80KB=24GB。
+    replay_capacity: int = 100000
     # 折扣因子。
     gamma: float = 0.99
     # 学习率。
@@ -152,8 +153,8 @@ class TrainingDefaults:
     epsilon_start: float = 1.0
     # epsilon-greedy 结束值。
     epsilon_end: float = 0.05
-    # epsilon 衰减步数。
-    epsilon_decay_steps: int = 100000
+    # epsilon 衰减步数（同时控制 heuristic/teacher/lambda 衰减节奏，200k 让引导信号更持久）。
+    epsilon_decay_steps: int = 200000
     # 评估间隔（每隔多少 episode 评估一次）。
     eval_interval: int = 50
     # 全量评估间隔（每隔多少 episode 使用全部验证场景评估一次，0 表示关闭）。

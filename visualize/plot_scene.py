@@ -24,11 +24,6 @@ def plot_scene(
 ) -> None:
     env = BattlefieldEnv()
     env.reset(scene_seed=scene_seed, scenario_mode=scenario_mode)
-    # 当前可视化固定敌人朝向向下（负Y方向），方便横向比较不同场景。
-    env.enemy_forward = env._normalize(np.array((0.0, -1.0), dtype=np.float32))
-    env.enemy_heading_deg = env._heading_deg(env.enemy_forward)
-    env.enemy_pose_source = f"{env.enemy_pose_source}|forced-down"
-    env._recompute_visibility_map()
 
     start = env.agent_position.astype(np.float32)
     goal = env.goal_position.astype(np.float32)
@@ -47,7 +42,6 @@ def plot_scene(
     else:
         title += " | fixed scene"
     title += f" | enemy=({int(env.enemy_position[0])},{int(env.enemy_position[1])})"
-    title += f" theta={env.enemy_heading_deg:.1f}deg"
 
     ax_3d.set_title(title)
 
@@ -93,7 +87,6 @@ def draw_3d_scene(ax: plt.Axes, env: BattlefieldEnv) -> None:
     ax.scatter(enemy[0] + 0.4, enemy[1] + 0.4, enemy[2] + 0.3, color="red", s=90, label="Enemy Lookout")
 
     _plot_3d_floor_grid(ax, env)
-    _plot_enemy_fov(ax, env)
     ax.set_xlabel("X")
     ax.set_ylabel("Y")
     ax.set_zlabel("Height")
@@ -135,70 +128,6 @@ def _plot_3d_floor_grid(ax: plt.Axes, env: BattlefieldEnv) -> None:
             linewidth=0.45,
             zorder=0,
         )
-
-
-def _plot_enemy_fov(ax: plt.Axes, env: BattlefieldEnv) -> None:
-    config = env.config
-    enemy = env.enemy_position
-    forward = env.enemy_forward
-    horizontal_half = np.deg2rad(config.enemy_horizontal_fov_deg / 2.0)
-    yaw_center = np.arctan2(forward[1], forward[0])
-    radius = config.enemy_max_range
-    base_z = float(enemy[2]) + 0.05
-    yaw_values = np.linspace(yaw_center - horizontal_half, yaw_center + horizontal_half, 72, dtype=np.float32)
-    fan_x = enemy[0] + radius * np.cos(yaw_values)
-    fan_y = enemy[1] + radius * np.sin(yaw_values)
-    fan_z = np.full_like(fan_x, base_z)
-
-    poly_x = np.concatenate(([enemy[0]], fan_x, [enemy[0]]))
-    poly_y = np.concatenate(([enemy[1]], fan_y, [enemy[1]]))
-    poly_z = np.full_like(poly_x, base_z)
-    ax.plot_trisurf(poly_x, poly_y, poly_z, color="#9aa0a6", alpha=0.12, linewidth=0.0, shade=False)
-
-    visible_mask, occluded_mask = _compute_fov_masks(env)
-    if np.any(occluded_mask):
-        occluded_cells = np.argwhere(occluded_mask)
-        ax.scatter(
-            occluded_cells[:, 0] + 0.5,
-            occluded_cells[:, 1] + 0.5,
-            np.full(len(occluded_cells), base_z + 0.03, dtype=np.float32),
-            marker="s",
-            s=24,
-            color="#9aa0a6",
-            alpha=0.35,
-            depthshade=False,
-            label="FOV Occluded",
-        )
-    if np.any(visible_mask):
-        visible_cells = np.argwhere(visible_mask)
-        ax.scatter(
-            visible_cells[:, 0] + 0.5,
-            visible_cells[:, 1] + 0.5,
-            np.full(len(visible_cells), base_z + 0.04, dtype=np.float32),
-            marker="s",
-            s=24,
-            color="#ff8a80",
-            alpha=0.55,
-            depthshade=False,
-            label="FOV Visible",
-        )
-
-    left_x = [enemy[0], enemy[0] + radius * np.cos(yaw_center - horizontal_half)]
-    left_y = [enemy[1], enemy[1] + radius * np.sin(yaw_center - horizontal_half)]
-    right_x = [enemy[0], enemy[0] + radius * np.cos(yaw_center + horizontal_half)]
-    right_y = [enemy[1], enemy[1] + radius * np.sin(yaw_center + horizontal_half)]
-    ax.plot(left_x, left_y, [base_z + 0.01, base_z + 0.01], color="#e85d5d", alpha=0.75, linewidth=1.2)
-    ax.plot(right_x, right_y, [base_z + 0.01, base_z + 0.01], color="#e85d5d", alpha=0.75, linewidth=1.2)
-    ax.plot(fan_x, fan_y, fan_z + 0.01, color="#e85d5d", alpha=0.65, linewidth=1.2)
-    ax.plot(
-        [enemy[0], enemy[0] + radius * 0.35 * np.cos(yaw_center)],
-        [enemy[1], enemy[1] + radius * 0.35 * np.sin(yaw_center)],
-        [base_z + 0.03, base_z + 0.03],
-        color="#d32f2f",
-        linewidth=2.2,
-        alpha=0.9,
-        label="Enemy Heading",
-    )
 
 
 def _plot_reference_path(ax: plt.Axes, start: np.ndarray, goal: np.ndarray) -> None:
@@ -258,33 +187,15 @@ def _plot_topdown_scene(ax: plt.Axes, env: BattlefieldEnv, title: str) -> None:
     ax.scatter(start[0], start[1], color="green", s=110, label="Start", zorder=5)
     ax.scatter(goal[0], goal[1], color="blue", s=110, label="Goal", zorder=5)
     ax.scatter(enemy[0], enemy[1], color="red", s=120, label="Enemy Lookout", zorder=5)
-    heading_scale = 2.2
-    ax.arrow(
-        float(enemy[0]),
-        float(enemy[1]),
-        float(env.enemy_forward[0]) * heading_scale,
-        float(env.enemy_forward[1]) * heading_scale,
-        width=0.08,
-        head_width=0.55,
-        head_length=0.65,
-        length_includes_head=True,
-        color="#d32f2f",
-        alpha=0.95,
-        zorder=6,
-    )
     ax.text(
         float(enemy[0]) + 0.5,
         float(enemy[1]) + 0.6,
-        f"theta={env.enemy_heading_deg:.1f}deg\nscore={env.enemy_pose_score:.0f}\n{env.enemy_pose_source}",
+        f"score={env.enemy_pose_score:.0f}\n{env.enemy_pose_source}",
         fontsize=8.5,
         color="#7a1f1f",
         bbox={"boxstyle": "round,pad=0.2", "facecolor": "white", "alpha": 0.85, "edgecolor": "#ddbbbb"},
         zorder=7,
     )
-
-    ax.scatter([], [], marker="s", s=80, color="#ff8a80", alpha=0.55, label="FOV Visible")
-    ax.scatter([], [], marker="s", s=80, color="#9aa0a6", alpha=0.5, label="FOV Occluded")
-    ax.scatter([], [], marker="", label="Enemy heading shown by arrow")
 
     ax.set_title(title)
     ax.set_xlabel("X")
@@ -310,7 +221,7 @@ def _compute_direct_visibility_binary(env: BattlefieldEnv) -> np.ndarray:
     binary_map = np.zeros((env.grid_size, env.grid_size), dtype=np.int32)
     for x in range(env.grid_size):
         for y in range(env.grid_size):
-            visible = env._compute_cell_visibility_from(enemy_cell, env.enemy_forward, (x, y))
+            visible = env._compute_cell_visibility_from(enemy_cell, (x, y))
             binary_map[x, y] = 1 if visible > 0.5 else 0
     return binary_map
 
