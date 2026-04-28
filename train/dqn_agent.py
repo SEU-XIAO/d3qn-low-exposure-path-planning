@@ -246,18 +246,24 @@ class DoubleDQNAgent:
             nth_local_t = torch.from_numpy(nth_local.astype(np.float32) / 255.0).float().to(self.device)
             nth_global_t = torch.from_numpy(nth_global.astype(np.float32)).float().to(self.device)
             nth_done_t = torch.from_numpy(nth_done).float().to(self.device)
+            nth_mask_t = torch.from_numpy(nth_mask).float().to(self.device)
 
-            # Double DQN: online 选动作, target 估值（第 n 步）
-            nth_online_q = self.online_net(nth_local_t, nth_global_t)
-            nth_valid_mask = torch.from_numpy(nth_mask).float().to(self.device)
-            nth_online_q = self._mask_invalid_actions(nth_online_q, nth_valid_mask)
-            nth_actions = torch.argmax(nth_online_q, dim=1, keepdim=True)
+            td_target = n_step_ret_t.clone()
+            bootstrap_mask = nth_done_t < 0.5  # 仅未截断的过渡需要 bootstrapping
+            if bootstrap_mask.any():
+                nth_local_valid = nth_local_t[bootstrap_mask]
+                nth_global_valid = nth_global_t[bootstrap_mask]
+                nth_mask_valid = nth_mask_t[bootstrap_mask]
 
-            nth_target_q_full = self.target_net(nth_local_t, nth_global_t)
-            nth_target_q_full = self._mask_invalid_actions(nth_target_q_full, nth_valid_mask)
-            nth_target_q = nth_target_q_full.gather(1, nth_actions).squeeze(1)
+                nth_online_q = self.online_net(nth_local_valid, nth_global_valid)
+                nth_online_q = self._mask_invalid_actions(nth_online_q, nth_mask_valid)
+                nth_actions = torch.argmax(nth_online_q, dim=1, keepdim=True)
 
-            td_target = n_step_ret_t + (gamma ** n_step) * nth_target_q * (1.0 - nth_done_t)
+                nth_target_q_full = self.target_net(nth_local_valid, nth_global_valid)
+                nth_target_q_full = self._mask_invalid_actions(nth_target_q_full, nth_mask_valid)
+                nth_target_q = nth_target_q_full.gather(1, nth_actions).squeeze(1)
+
+                td_target[bootstrap_mask] += (gamma ** n_step) * nth_target_q
 
             # BC 正则化目标：冻结 BC 网络给出最优动作标签
             bc_q = self.bc_net(local_map, global_features)

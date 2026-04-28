@@ -28,7 +28,8 @@
       "Bash(python -c \"from train.bc_pretrain import main; print\\('OK'\\)\")",
       "Bash(python -c \"from config import TrainingDefaults; t=TrainingDefaults\\(\\); print\\(f'lr={t.learning_rate}, warmup={t.warmup_steps}, grad_norm={t.max_gradient_norm}'\\)\")",
       "Bash(python -c \"from train.bc_pretrain import generate_expert_data, train_bc, save_bc_checkpoint; print\\('OK'\\)\")",
-      "Bash(python -c \"from train.dqn_agent import DoubleDQNAgent, TrainingConfig; a=DoubleDQNAgent\\(action_dim=8\\); print\\(f'n_step={a.config.n_step}, bc_reg={a.config.bc_reg_weight}'\\); print\\('OK'\\)\")"
+      "Bash(python -c \"from train.dqn_agent import DoubleDQNAgent, TrainingConfig; a=DoubleDQNAgent\\(action_dim=8\\); print\\(f'n_step={a.config.n_step}, bc_reg={a.config.bc_reg_weight}'\\); print\\('OK'\\)\")",
+      "Bash(python -c \"from train.dqn_agent import DoubleDQNAgent; print\\('OK'\\)\")"
     ]
   }
 }
