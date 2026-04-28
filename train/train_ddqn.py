@@ -195,38 +195,44 @@ def _relabel_her(
     k: int,
     log_fn: Callable[[str], None] | None = None,
 ) -> None:
-    """HER: 失败 episode 中用已访问位置作为"伪目标"重新标记奖励。
+    """HER 'future': 失败 episode 中，对每步采样未来位置，若动作靠近未来位置则加进度奖励。
 
-    对每个选中的伪目标 g，将到达 g 的那一步奖励加 partial_goal_reward，
-    让 agent 学到"往前走了就是好的"，而非全部被判为失败。
+    相比随机伪目标，future 策略让 agent 学到"朝自己实际到达过的地方走就是好的"，
+    提供更密集且相关的正向反馈。
     """
-    if len(positions) < 3 or k <= 0:
+    T = len(transitions)
+    if T < 3 or k <= 0:
         return
 
-    # 选 k 个已访问位置作为伪目标（排除起点和终点附近）
-    candidates = list(range(2, len(positions) - 1))
-    if not candidates:
-        return
-    n_select = min(k, len(candidates))
-    selected = random.sample(candidates, n_select)
-
-    partial_reward = env.config.goal_reward * 0.3  # 30% 的终点奖励
+    progress_reward = env.config.goal_reward * 0.05  # 每步进度奖励 = 终点奖励 5%
     relabeled = 0
 
-    for goal_step in selected:
-        goal_pos = positions[goal_step]
-        for t in range(goal_step):
-            obs, action, reward, next_obs, done, valid_actions = transitions[t]
-            next_pos = positions[t + 1]
-            # 到达伪目标的那一步
-            if next_pos == goal_pos:
-                new_reward = reward + partial_reward
-                new_done = False  # 不终止 episode
-                agent.store_transition(obs, action, new_reward, next_obs, new_done, valid_actions)
-                relabeled += 1
+    for t in range(T - 1):
+        obs, action, reward, next_obs, done, valid_actions = transitions[t]
+        current_pos = np.array(positions[t], dtype=np.float32)
+        next_pos = np.array(positions[t + 1], dtype=np.float32)
+
+        # 从 t+2 之后的未来位置中采样
+        future_candidates = positions[t + 2:]
+        if not future_candidates:
+            continue
+        n_sample = min(k, len(future_candidates))
+        sampled = random.sample(future_candidates, n_sample)
+
+        made_progress = False
+        for future_pos in sampled:
+            fp = np.array(future_pos, dtype=np.float32)
+            if np.linalg.norm(next_pos - fp) < np.linalg.norm(current_pos - fp):
+                made_progress = True
+                break
+
+        if made_progress:
+            new_reward = reward + progress_reward
+            agent.store_transition(obs, action, new_reward, next_obs, False, valid_actions)
+            relabeled += 1
 
     if relabeled > 0 and log_fn is not None:
-        log_fn(f"[HER] {len(selected)} 伪目标, 重标记 {relabeled} 条正奖励")
+        log_fn(f"[HER-future] relabeled {relabeled}/{T} transitions")
 
 
 def evaluate_policy(

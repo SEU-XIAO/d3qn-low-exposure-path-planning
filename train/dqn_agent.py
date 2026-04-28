@@ -33,7 +33,12 @@ class TrainingConfig:
     save_interval: int = TrainingDefaults().save_interval
     max_gradient_norm: float = TrainingDefaults().max_gradient_norm
     n_step: int = TrainingDefaults().n_step
-    bc_reg_weight: float = TrainingDefaults().bc_reg_weight
+    bc_reg_weight_start: float = TrainingDefaults().bc_reg_weight_start
+    bc_reg_weight_end: float = TrainingDefaults().bc_reg_weight_end
+    per_alpha: float = TrainingDefaults().per_alpha
+    per_beta_start: float = TrainingDefaults().per_beta_start
+    per_beta_end: float = TrainingDefaults().per_beta_end
+    per_epsilon: float = TrainingDefaults().per_epsilon
     her_relabel_count: int = TrainingDefaults().her_relabel_count
     seed: int = TrainingDefaults().seed
     exploration: ExplorationConfig = field(default_factory=lambda: TrainingDefaults().exploration)
@@ -188,6 +193,20 @@ class DoubleDQNAgent:
         ratio = global_step / max(1, self.config.epsilon_decay_steps)
         return start + ratio * (end - start)
 
+    def _current_bc_reg_weight(self) -> float:
+        decay_steps = max(1, self.config.epsilon_decay_steps // self.config.train_frequency)
+        if self.training_steps >= decay_steps:
+            return self.config.bc_reg_weight_end
+        ratio = self.training_steps / decay_steps
+        return self.config.bc_reg_weight_start + ratio * (self.config.bc_reg_weight_end - self.config.bc_reg_weight_start)
+
+    def _current_per_beta(self) -> float:
+        decay_steps = max(1, self.config.epsilon_decay_steps // self.config.train_frequency)
+        if self.training_steps >= decay_steps:
+            return self.config.per_beta_end
+        ratio = self.training_steps / decay_steps
+        return self.config.per_beta_start + ratio * (self.config.per_beta_end - self.config.per_beta_start)
+
     def reset_episode_stats(self) -> None:
         for key in self.episode_action_stats:
             self.episode_action_stats[key] = 0
@@ -222,11 +241,14 @@ class DoubleDQNAgent:
         n_step = self.config.n_step
         gamma = self.config.gamma
 
-        indices = self.replay_buffer.sample_n_step_indices(batch_size)
+        per_beta = self._current_per_beta()
+        indices, is_weights = self.replay_buffer.sample_per(batch_size, self.config.per_alpha, per_beta)
+        if len(indices) == 0:
+            return 0.0
         n_step_returns, nth_local, nth_global, nth_done, nth_mask = \
             self.replay_buffer.get_n_step_data(indices, n_step, gamma)
 
-        # 加载当前状态和动作（直接用索引取）
+        # 加载当前状态和动作
         local_map = torch.from_numpy(
             self.replay_buffer.local_maps[indices].astype(np.float32) / 255.0,
         ).float().to(self.device)
@@ -236,6 +258,7 @@ class DoubleDQNAgent:
         actions = torch.from_numpy(
             self.replay_buffer.actions[indices],
         ).long().to(self.device)
+        is_weights_t = torch.from_numpy(is_weights).float().to(self.device)
 
         self.online_net.train()
         online_q = self.online_net(local_map, global_features)
@@ -249,7 +272,7 @@ class DoubleDQNAgent:
             nth_mask_t = torch.from_numpy(nth_mask).float().to(self.device)
 
             td_target = n_step_ret_t.clone()
-            bootstrap_mask = nth_done_t < 0.5  # 仅未截断的过渡需要 bootstrapping
+            bootstrap_mask = nth_done_t < 0.5
             if bootstrap_mask.any():
                 nth_local_valid = nth_local_t[bootstrap_mask]
                 nth_global_valid = nth_global_t[bootstrap_mask]
@@ -265,21 +288,28 @@ class DoubleDQNAgent:
 
                 td_target[bootstrap_mask] += (gamma ** n_step) * nth_target_q
 
-            # BC 正则化目标：冻结 BC 网络给出最优动作标签
             bc_q = self.bc_net(local_map, global_features)
             bc_expert = torch.argmax(bc_q, dim=1)
 
+        # TD 误差（用于 PER 优先级更新）
+        td_errors = (current_q - td_target).abs().detach().cpu().numpy()
+
+        # 带 IS 权重的 TD 损失 + 衰减 BC 正则化
         td_loss = self.loss_fn(current_q, td_target)
+        weighted_td_loss = (is_weights_t * td_loss).mean()
+        bc_reg_weight = self._current_bc_reg_weight()
         ce_loss = nn.functional.cross_entropy(online_q, bc_expert)
-        loss = td_loss + self.config.bc_reg_weight * ce_loss
+        loss = weighted_td_loss + bc_reg_weight * ce_loss
 
         self.optimizer.zero_grad()
         loss.backward()
         torch.nn.utils.clip_grad_norm_(self.online_net.parameters(), self.config.max_gradient_norm)
         self.optimizer.step()
 
+        self.replay_buffer.update_priorities(indices, td_errors, self.config.per_epsilon)
+
         self.training_steps += 1
-        self.last_loss = float(td_loss.item())
+        self.last_loss = float(td_loss.mean().item())
         if self.training_steps % self.config.target_update_interval == 0:
             self.target_net.load_state_dict(self.online_net.state_dict())
 

@@ -167,8 +167,18 @@ class TrainingDefaults:
     max_gradient_norm: float = 1.0
     # n-step TD 步数（加速奖励传播）。
     n_step: int = 5
-    # BC 正则化权重（防止策略遗忘 BC 知识）。
-    bc_reg_weight: float = 0.5
+    # BC 正则化权重起始值（防止策略遗忘 BC 知识，随训练衰减）。
+    bc_reg_weight_start: float = 0.5
+    # BC 正则化权重结束值（衰减到接近 0，让 DQN 自由超越专家）。
+    bc_reg_weight_end: float = 0.05
+    # PER 优先级指数（0=均匀采样，1=完全按优先级）。
+    per_alpha: float = 0.6
+    # PER 重要性采样修正起始值（纠正非均匀采样的偏差）。
+    per_beta_start: float = 0.4
+    # PER 重要性采样修正结束值（训练后期收敛到 1.0）。
+    per_beta_end: float = 1.0
+    # PER 优先级小量（确保所有转移都有非零采样概率）。
+    per_epsilon: float = 1e-6
     # BC 数据增强：每条路径额外采样的随机起点数。
     bc_augment_samples: int = 5
     # HER 重新标记：失败 episode 中用多少个"已到达位置"作为伪目标。

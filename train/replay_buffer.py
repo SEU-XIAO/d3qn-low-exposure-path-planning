@@ -4,7 +4,7 @@ import numpy as np
 
 
 class ReplayBuffer:
-    """环形缓冲区，支持 n-step TD 采样和 episode 边界追踪。
+    """环形缓冲区，支持 n-step TD 采样、episode 边界追踪和优先经验回放 (PER)。
 
     local_map 用 uint8 存储节省 4× 内存（输入值域 [0,1]）。
     """
@@ -24,10 +24,12 @@ class ReplayBuffer:
         self.next_valid_masks = np.zeros((capacity, action_dim), dtype=np.float32)
         self.dones = np.zeros(capacity, dtype=np.bool_)
         self.episode_starts = np.zeros(capacity, dtype=np.bool_)
+        self.priorities = np.zeros(capacity, dtype=np.float32)
 
         self._pos = 0
         self._size = 0
         self._pending_episode_start = True
+        self._max_priority = 1.0
 
     def __len__(self) -> int:
         return self._size
@@ -58,6 +60,8 @@ class ReplayBuffer:
             mask[next_valid_actions] = 1.0
         self.next_valid_masks[idx] = mask
 
+        self.priorities[idx] = self._max_priority
+
         self._pending_episode_start = done
         self._pos = (idx + 1) % self.capacity
         if self._size < self.capacity:
@@ -77,6 +81,32 @@ class ReplayBuffer:
             "done": self.dones[indices].astype(np.float32),
         }
         return payload
+
+    def sample_per(self, batch_size: int, alpha: float, beta: float) -> tuple[np.ndarray, np.ndarray]:
+        """优先级采样，返回 (indices, is_weights)。"""
+        if self._size == 0:
+            return np.zeros(0, dtype=np.int64), np.zeros(0, dtype=np.float32)
+
+        probs = self.priorities[:self._size] ** alpha
+        probs_sum = probs.sum()
+        if probs_sum <= 0:
+            probs = np.ones(self._size) / self._size
+        else:
+            probs /= probs_sum
+
+        indices = np.random.choice(self._size, size=min(batch_size, self._size), p=probs, replace=False)
+
+        # IS 权重：w_i = (N * P(i))^(-beta)，归一化除以 max 稳定训练
+        weights = (self._size * probs[indices]) ** (-beta)
+        weights /= max(weights.max(), 1e-8)
+        return indices.astype(np.int64), weights.astype(np.float32)
+
+    def update_priorities(self, indices: np.ndarray, td_errors: np.ndarray, epsilon: float) -> None:
+        """根据 TD 误差更新优先级。"""
+        new_priorities = np.abs(td_errors) + epsilon
+        for i, idx in enumerate(indices):
+            self.priorities[idx] = float(new_priorities[i])
+        self._max_priority = max(self._max_priority, float(new_priorities.max()))
 
     def sample_n_step_indices(self, batch_size: int) -> np.ndarray:
         """采样不含 episode 边界的起始索引（供 n-step TD 使用）。"""
