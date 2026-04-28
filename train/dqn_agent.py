@@ -32,6 +32,9 @@ class TrainingConfig:
     full_eval_interval: int = TrainingDefaults().full_eval_interval
     save_interval: int = TrainingDefaults().save_interval
     max_gradient_norm: float = TrainingDefaults().max_gradient_norm
+    n_step: int = TrainingDefaults().n_step
+    bc_reg_weight: float = TrainingDefaults().bc_reg_weight
+    her_relabel_count: int = TrainingDefaults().her_relabel_count
     seed: int = TrainingDefaults().seed
     exploration: ExplorationConfig = field(default_factory=lambda: TrainingDefaults().exploration)
     early_stop_enabled: bool = TrainingDefaults().early_stop_enabled
@@ -55,6 +58,12 @@ class DoubleDQNAgent:
         self.target_net = HybridPolicyNetwork(action_dim=self.action_dim).to(self.device)
         self.target_net.load_state_dict(self.online_net.state_dict())
         self.target_net.eval()
+
+        self.bc_net = HybridPolicyNetwork(action_dim=self.action_dim).to(self.device)
+        self.bc_net.load_state_dict(self.online_net.state_dict())
+        for p in self.bc_net.parameters():
+            p.requires_grad = False
+        self.bc_net.eval()
 
         self.optimizer = torch.optim.Adam(self.online_net.parameters(), lr=self.config.learning_rate)
         self.loss_fn = nn.SmoothL1Loss()
@@ -210,38 +219,63 @@ class DoubleDQNAgent:
         return len(self.replay_buffer) >= batch_size
 
     def train_step(self, batch_size: int) -> float:
-        batch = self.replay_buffer.sample(batch_size)
-        local_map = torch.from_numpy(batch["local_map"]).float().to(self.device)
-        global_features = torch.from_numpy(batch["global_features"]).float().to(self.device)
-        actions = torch.from_numpy(batch["action"]).long().to(self.device)
-        rewards = torch.from_numpy(batch["reward"]).float().to(self.device)
-        next_local_map = torch.from_numpy(batch["next_local_map"]).float().to(self.device)
-        next_global_features = torch.from_numpy(batch["next_global_features"]).float().to(self.device)
-        dones = torch.from_numpy(batch["done"]).float().to(self.device)
+        n_step = self.config.n_step
+        gamma = self.config.gamma
+
+        indices = self.replay_buffer.sample_n_step_indices(batch_size)
+        n_step_returns, nth_local, nth_global, nth_done = \
+            self.replay_buffer.get_n_step_data(indices, n_step, gamma)
+
+        # 加载当前状态和动作（直接用索引取）
+        local_map = torch.from_numpy(
+            self.replay_buffer.local_maps[indices].astype(np.float32) / 255.0,
+        ).float().to(self.device)
+        global_features = torch.from_numpy(
+            self.replay_buffer.global_features[indices].astype(np.float32),
+        ).float().to(self.device)
+        actions = torch.from_numpy(
+            self.replay_buffer.actions[indices],
+        ).long().to(self.device)
 
         self.online_net.train()
-        current_q = self.online_net(local_map, global_features).gather(1, actions.unsqueeze(1)).squeeze(1)
+        online_q = self.online_net(local_map, global_features)
+        current_q = online_q.gather(1, actions.unsqueeze(1)).squeeze(1)
 
         with torch.no_grad():
-            next_online_q = self.online_net(next_local_map, next_global_features)
-            next_valid_mask = batch.get("next_valid_action_mask")
-            if next_valid_mask is not None:
-                next_online_q = self._mask_invalid_actions(next_online_q, next_valid_mask)
-            next_actions = torch.argmax(next_online_q, dim=1, keepdim=True)
-            next_target_q_full = self.target_net(next_local_map, next_global_features)
-            if next_valid_mask is not None:
-                next_target_q_full = self._mask_invalid_actions(next_target_q_full, next_valid_mask)
-            next_target_q = next_target_q_full.gather(1, next_actions).squeeze(1)
-            td_target = rewards + self.config.gamma * next_target_q * (1.0 - dones)
+            n_step_ret_t = torch.from_numpy(n_step_returns).float().to(self.device)
+            nth_local_t = torch.from_numpy(nth_local.astype(np.float32) / 255.0).float().to(self.device)
+            nth_global_t = torch.from_numpy(nth_global.astype(np.float32)).float().to(self.device)
+            nth_done_t = torch.from_numpy(nth_done).float().to(self.device)
 
-        loss = self.loss_fn(current_q, td_target)
+            # Double DQN: online 选动作, target 估值（第 n 步）
+            nth_online_q = self.online_net(nth_local_t, nth_global_t)
+            nth_valid_mask = torch.from_numpy(
+                self.replay_buffer.next_valid_masks[indices],
+            ).float().to(self.device)
+            nth_online_q = self._mask_invalid_actions(nth_online_q, nth_valid_mask)
+            nth_actions = torch.argmax(nth_online_q, dim=1, keepdim=True)
+
+            nth_target_q_full = self.target_net(nth_local_t, nth_global_t)
+            nth_target_q_full = self._mask_invalid_actions(nth_target_q_full, nth_valid_mask)
+            nth_target_q = nth_target_q_full.gather(1, nth_actions).squeeze(1)
+
+            td_target = n_step_ret_t + (gamma ** n_step) * nth_target_q * (1.0 - nth_done_t)
+
+            # BC 正则化目标：冻结 BC 网络给出最优动作标签
+            bc_q = self.bc_net(local_map, global_features)
+            bc_expert = torch.argmax(bc_q, dim=1)
+
+        td_loss = self.loss_fn(current_q, td_target)
+        ce_loss = nn.functional.cross_entropy(online_q, bc_expert)
+        loss = td_loss + self.config.bc_reg_weight * ce_loss
+
         self.optimizer.zero_grad()
         loss.backward()
         torch.nn.utils.clip_grad_norm_(self.online_net.parameters(), self.config.max_gradient_norm)
         self.optimizer.step()
 
         self.training_steps += 1
-        self.last_loss = float(loss.item())
+        self.last_loss = float(td_loss.item())
         if self.training_steps % self.config.target_update_interval == 0:
             self.target_net.load_state_dict(self.online_net.state_dict())
 
@@ -287,3 +321,5 @@ class DoubleDQNAgent:
             self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         self.training_steps = int(checkpoint.get("training_steps", 0))
         self.last_loss = float(checkpoint.get("last_loss", 0.0))
+        # 同步冻结 BC 网络
+        self.bc_net.load_state_dict(checkpoint["online_state_dict"])

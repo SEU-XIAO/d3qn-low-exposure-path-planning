@@ -6,6 +6,8 @@ import random
 import statistics
 from typing import Callable
 
+import numpy as np
+
 from env.battlefield_env import BattlefieldEnv
 from train.dqn_agent import DoubleDQNAgent, TrainingConfig
 
@@ -57,6 +59,10 @@ def train(config: TrainingConfig | None = None, bc_pretrain_path: str = "artifac
             episode_loss: list[float] = []
             success = False
 
+            # HER 轨迹追踪
+            episode_positions: list[tuple[int, int]] = [tuple(env.agent_position.tolist())]
+            episode_transitions: list[tuple] = []
+
             while not done:
                 epsilon = agent.current_epsilon(global_step)
                 action = agent.select_action(observation, epsilon, env=env, global_step=global_step)
@@ -71,6 +77,12 @@ def train(config: TrainingConfig | None = None, bc_pretrain_path: str = "artifac
                     next_valid_actions=next_valid_actions,
                 )
 
+                episode_positions.append(tuple(env.agent_position.tolist()))
+                episode_transitions.append((
+                    observation, action, result.reward,
+                    result.observation, result.done, next_valid_actions,
+                ))
+
                 observation = result.observation
                 episode_reward += result.reward
                 done = result.done
@@ -79,6 +91,11 @@ def train(config: TrainingConfig | None = None, bc_pretrain_path: str = "artifac
 
                 if global_step >= config.warmup_steps and global_step % config.train_frequency == 0 and agent.can_train(config.batch_size):
                     episode_loss.append(agent.train_step(config.batch_size))
+
+            # HER: 失败 episode 用已访问位置重新标记奖励
+            if not success:
+                _relabel_her(agent, env, episode_positions, episode_transitions,
+                             k=config.her_relabel_count, log_fn=log)
 
             recent_rewards.append(episode_reward)
             if len(recent_rewards) > 20:
@@ -168,6 +185,48 @@ def train(config: TrainingConfig | None = None, bc_pretrain_path: str = "artifac
         log(f"最后完成的 episode: {last_completed_episode}")
     finally:
         log_fp.close()
+
+
+def _relabel_her(
+    agent: DoubleDQNAgent,
+    env: BattlefieldEnv,
+    positions: list[tuple[int, int]],
+    transitions: list[tuple],
+    k: int,
+    log_fn: Callable[[str], None] | None = None,
+) -> None:
+    """HER: 失败 episode 中用已访问位置作为"伪目标"重新标记奖励。
+
+    对每个选中的伪目标 g，将到达 g 的那一步奖励加 partial_goal_reward，
+    让 agent 学到"往前走了就是好的"，而非全部被判为失败。
+    """
+    if len(positions) < 3 or k <= 0:
+        return
+
+    # 选 k 个已访问位置作为伪目标（排除起点和终点附近）
+    candidates = list(range(2, len(positions) - 1))
+    if not candidates:
+        return
+    n_select = min(k, len(candidates))
+    selected = random.sample(candidates, n_select)
+
+    partial_reward = env.config.goal_reward * 0.3  # 30% 的终点奖励
+    relabeled = 0
+
+    for goal_step in selected:
+        goal_pos = positions[goal_step]
+        for t in range(goal_step):
+            obs, action, reward, next_obs, done, valid_actions = transitions[t]
+            next_pos = positions[t + 1]
+            # 到达伪目标的那一步
+            if next_pos == goal_pos:
+                new_reward = reward + partial_reward
+                new_done = False  # 不终止 episode
+                agent.store_transition(obs, action, new_reward, next_obs, new_done, valid_actions)
+                relabeled += 1
+
+    if relabeled > 0 and log_fn is not None:
+        log_fn(f"[HER] {len(selected)} 伪目标, 重标记 {relabeled} 条正奖励")
 
 
 def evaluate_policy(

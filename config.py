@@ -87,8 +87,8 @@ class EnvConfig:
 
     # 每一步基础惩罚，鼓励更短路径。
     step_penalty: float = 0.05
-    # 向目标靠近的稠密奖励权重（小值，仅提供方向信号）。
-    progress_weight: float = 0.05
+    # 向目标靠近的稠密奖励权重。
+    progress_weight: float = 0.2
     # 处在可见区域的额外惩罚系数。0.4 意味着走 2~3 步暴露格子 ≈ 多走 1 步，允许必要时的短暂暴露。
     visible_penalty: float = 0.4
     # 到达目标的终点奖励。
@@ -163,9 +163,17 @@ class TrainingDefaults:
     full_eval_interval: int = 200
     # 保存间隔（每隔多少 episode 保存一次）。
     save_interval: int = 100
-    # 梯度裁剪最大范数（收紧以配合 BC 微调）。
+    # 梯度裁剪最大范数。
     max_gradient_norm: float = 1.0
-    # 随机种子（影响训练可重复性）。
+    # n-step TD 步数（加速奖励传播）。
+    n_step: int = 5
+    # BC 正则化权重（防止策略遗忘 BC 知识）。
+    bc_reg_weight: float = 0.5
+    # BC 数据增强：每条路径额外采样的随机起点数。
+    bc_augment_samples: int = 5
+    # HER 重新标记：失败 episode 中用多少个"已到达位置"作为伪目标。
+    her_relabel_count: int = 4
+    # 随机种子。
     seed: int = 42
     # 探索相关配置集合。
     exploration: ExplorationConfig = field(default_factory=ExplorationConfig)

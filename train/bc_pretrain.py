@@ -28,8 +28,62 @@ GAMMA = TrainingDefaults().gamma  # 0.99，与 DQN 一致
 CE_WEIGHT = 1.0  # CE 损失权重，与 MSE 平衡（MSE 校准量级，CE 保序）
 
 
-def generate_expert_data(episodes: int = 2000) -> list[dict[str, np.ndarray]]:
-    """生成专家轨迹数据集，每步附带 Monte Carlo 回报。"""
+def _process_path(
+    env: BattlefieldEnv,
+    path: list[tuple[int, int]],
+    goal_pos: np.ndarray,
+    sp: float, vp: float, pw: float, gr: float,
+) -> list[dict]:
+    """将一条 A* 路径转换为带 MC 回报的 step records。"""
+    step_records: list[dict] = []
+    for i in range(len(path) - 1):
+        current = path[i]
+        nxt = path[i + 1]
+        move = (nxt[0] - current[0], nxt[1] - current[1])
+        try:
+            action = env.ACTIONS.index(move)
+        except ValueError:
+            break
+
+        env.agent_position = np.array(current, dtype=np.int32)
+        obs = env.get_observation()
+        move_cost = 1.414 if move[0] != 0 and move[1] != 0 else 1.0
+        vis = float(env.visibility_map[tuple(nxt)])
+        prev_dist = float(np.linalg.norm(
+            np.array(current, dtype=np.float32) - goal_pos.astype(np.float32)))
+        cur_dist = float(np.linalg.norm(
+            np.array(nxt, dtype=np.float32) - goal_pos.astype(np.float32)))
+        step_records.append({
+            "local_map": obs["local_map"].copy(),
+            "global_features": obs["global_features"].copy(),
+            "action": action,
+            "move_cost": move_cost,
+            "visibility": vis,
+            "prev_dist": prev_dist,
+            "cur_dist": cur_dist,
+        })
+
+    mc_return = 0.0
+    for idx, rec in enumerate(reversed(step_records)):
+        step_r = -(sp + vp * rec["visibility"]) * rec["move_cost"] \
+                 + (rec["prev_dist"] - rec["cur_dist"]) * pw
+        if idx == 0:
+            step_r += gr
+        mc_return = step_r + GAMMA * mc_return
+        rec["mc_return"] = float(mc_return)
+
+    return step_records
+
+
+def generate_expert_data(
+    episodes: int = 2000,
+    augment_samples: int = 5,
+) -> list[dict[str, np.ndarray]]:
+    """生成专家轨迹数据集，每步附带 Monte Carlo 回报。
+
+    每条主路径额外从 augment_samples 个随机可通行格跑 A* 到终点，
+    让数据覆盖窗口内各种位置，教会网络"从任意位置恢复"。
+    """
     config = EnvConfig()
     env = BattlefieldEnv(config)
     dataset: list[dict[str, np.ndarray]] = []
@@ -40,7 +94,7 @@ def generate_expert_data(episodes: int = 2000) -> list[dict[str, np.ndarray]]:
     pw = config.progress_weight
     gr = config.goal_reward
 
-    print(f"生成专家数据 (目标 {episodes} 条路径)...")
+    print(f"生成专家数据 (目标 {episodes} 条主路径, 每条增强 {augment_samples} 个随机起点)...")
     for seed in range(1000, 1000 + episodes * 3):
         if path_count >= episodes:
             break
@@ -54,56 +108,37 @@ def generate_expert_data(episodes: int = 2000) -> list[dict[str, np.ndarray]]:
         if not result.success or len(result.path) < 2:
             continue
 
-        # 第一遍：收集路径上的每步信息
-        step_records: list[dict] = []
         goal_pos = np.array(result.path[-1], dtype=np.int32)
-        for i in range(len(result.path) - 1):
-            current = result.path[i]
-            nxt = result.path[i + 1]
-            move = (nxt[0] - current[0], nxt[1] - current[1])
-            try:
-                action = env.ACTIONS.index(move)
-            except ValueError:
-                break
+        start_pos = tuple(result.path[0])
+        original_goal = tuple(result.path[-1])
 
-            env.agent_position = np.array(current, dtype=np.int32)
-            obs = env.get_observation()
-            move_cost = 1.414 if move[0] != 0 and move[1] != 0 else 1.0
-            vis = float(env.visibility_map[tuple(nxt)])
-            prev_dist = float(np.linalg.norm(np.array(current, dtype=np.float32) - goal_pos.astype(np.float32)))
-            cur_dist = float(np.linalg.norm(np.array(nxt, dtype=np.float32) - goal_pos.astype(np.float32)))
-            step_records.append({
-                "local_map": obs["local_map"].copy(),
-                "global_features": obs["global_features"].copy(),
-                "action": action,
-                "move_cost": move_cost,
-                "visibility": vis,
-                "prev_dist": prev_dist,
-                "cur_dist": cur_dist,
-            })
+        # 处理主路径
+        for rec in _process_path(env, result.path, goal_pos, sp, vp, pw, gr):
+            dataset.append(rec)
 
-        # 第二遍：反向计算 MC 回报
-        mc_return = 0.0  # 终局后无未来收益
-        for idx, rec in enumerate(reversed(step_records)):
-            step_r = -(sp + vp * rec["visibility"]) * rec["move_cost"] \
-                     + (rec["prev_dist"] - rec["cur_dist"]) * pw
-            if idx == 0:  # 最后一步到达目标
-                step_r += gr
-            mc_return = step_r + GAMMA * mc_return
-            rec["mc_return"] = float(mc_return)
+        # 随机采样增强起点，跑 A* 到同一终点
+        window_tag = env.window_tag_map
+        if window_tag is not None and augment_samples > 0:
+            passable = [(x, y) for x in range(config.grid_size)
+                        for y in range(config.grid_size)
+                        if window_tag[x, y] == 0]
+            n_samples = min(augment_samples, len(passable))
+            # 固定随机数确保可重复
+            rng = np.random.RandomState(seed + 1000000)
+            chosen = [passable[i] for i in rng.choice(len(passable), size=n_samples, replace=False)]
 
-        for rec in step_records:
-            dataset.append({
-                "local_map": rec["local_map"],
-                "global_features": rec["global_features"],
-                "action": rec["action"],
-                "mc_return": rec["mc_return"],
-            })
+            for aug_start in chosen:
+                if aug_start == original_goal or aug_start == start_pos:
+                    continue
+                aug_result = planner.plan(start=aug_start, goal=original_goal)
+                if aug_result.success and len(aug_result.path) >= 2:
+                    for rec in _process_path(env, aug_result.path, goal_pos, sp, vp, pw, gr):
+                        dataset.append(rec)
 
         path_count += 1
 
-        if len(dataset) % 5000 == 0 or (len(dataset) > 0 and len(dataset) <= 100):
-            print(f"  已收集 {len(dataset)} 个状态-动作对 ({path_count} / {episodes} 条路径)")
+        if len(dataset) % 5000 == 0 or (path_count <= 3):
+            print(f"  已收集 {len(dataset)} 个状态-动作对 ({path_count} / {episodes} 条主路径)")
 
     print(f"专家数据生成完成: {len(dataset)} 个样本")
     return dataset
@@ -197,9 +232,11 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=512)
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--output", type=str, default="artifacts/ddqn_bc.pt")
+    parser.add_argument("--augment", type=int, default=TrainingDefaults().bc_augment_samples,
+                        help="每条路径的随机起点增强数")
     args = parser.parse_args()
 
-    dataset = generate_expert_data(args.episodes)
+    dataset = generate_expert_data(args.episodes, augment_samples=args.augment)
 
     net = train_bc(dataset, epochs=args.epochs, lr=args.lr,
                    batch_size=args.batch_size, device=args.device)
