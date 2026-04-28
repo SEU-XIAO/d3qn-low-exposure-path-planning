@@ -26,7 +26,8 @@
       "Bash(python -c \"from train.bc_pretrain import generate_expert_data; print\\('OK'\\)\")",
       "Bash(python -c \"from config import EnvConfig; c=EnvConfig\\(\\); assert hasattr\\(c, 'progress_weight'\\); print\\(f'progress_weight={c.progress_weight}'\\); from env.battlefield_env import BattlefieldEnv; print\\('OK'\\)\")",
       "Bash(python -c \"from train.bc_pretrain import main; print\\('OK'\\)\")",
-      "Bash(python -c \"from config import TrainingDefaults; t=TrainingDefaults\\(\\); print\\(f'lr={t.learning_rate}, warmup={t.warmup_steps}, grad_norm={t.max_gradient_norm}'\\)\")"
+      "Bash(python -c \"from config import TrainingDefaults; t=TrainingDefaults\\(\\); print\\(f'lr={t.learning_rate}, warmup={t.warmup_steps}, grad_norm={t.max_gradient_norm}'\\)\")",
+      "Bash(python -c \"from train.bc_pretrain import generate_expert_data, train_bc, save_bc_checkpoint; print\\('OK'\\)\")"
     ]
   }
 }
