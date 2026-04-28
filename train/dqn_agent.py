@@ -223,7 +223,7 @@ class DoubleDQNAgent:
         gamma = self.config.gamma
 
         indices = self.replay_buffer.sample_n_step_indices(batch_size)
-        n_step_returns, nth_local, nth_global, nth_done = \
+        n_step_returns, nth_local, nth_global, nth_done, nth_mask = \
             self.replay_buffer.get_n_step_data(indices, n_step, gamma)
 
         # 加载当前状态和动作（直接用索引取）
@@ -249,9 +249,7 @@ class DoubleDQNAgent:
 
             # Double DQN: online 选动作, target 估值（第 n 步）
             nth_online_q = self.online_net(nth_local_t, nth_global_t)
-            nth_valid_mask = torch.from_numpy(
-                self.replay_buffer.next_valid_masks[indices],
-            ).float().to(self.device)
+            nth_valid_mask = torch.from_numpy(nth_mask).float().to(self.device)
             nth_online_q = self._mask_invalid_actions(nth_online_q, nth_valid_mask)
             nth_actions = torch.argmax(nth_online_q, dim=1, keepdim=True)
 
@@ -289,6 +287,8 @@ class DoubleDQNAgent:
         if isinstance(valid_actions, np.ndarray) and valid_actions.ndim == 2:
             mask = torch.from_numpy(valid_actions).to(q_values.device)
             return q_values.masked_fill(mask <= 0.0, float("-inf"))
+        if isinstance(valid_actions, torch.Tensor) and valid_actions.ndim == 2:
+            return q_values.masked_fill(valid_actions <= 0.0, float("-inf"))
 
         mask = torch.full((self.action_dim,), float("-inf"), device=q_values.device)
         if valid_actions:

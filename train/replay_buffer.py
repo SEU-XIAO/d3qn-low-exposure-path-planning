@@ -130,18 +130,16 @@ class ReplayBuffer:
         indices: np.ndarray,
         n_step: int,
         gamma: float,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """返回 (n_step_return, nth_next_local, nth_next_global) 用于 n-step TD。
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """返回 (n_step_return, nth_next_local, nth_next_global, nth_done, nth_valid_mask)。
 
-        n_step_return = Σ_{k=0}^{n-1} γ^k * r_{t+k}
-        nth_next_* = s_{t+n}（用于计算 γ^n * max Q(s_{t+n}, a)）
-
-        若窗口内遇到 done，截断回报且用 done 标记终局。
+        nth_valid_mask 是第 n 步状态的合法动作掩码。
         """
         n_returns = np.zeros(len(indices), dtype=np.float32)
         nth_local = np.zeros((len(indices), 5, 50, 50), dtype=np.uint8)
         nth_global = np.zeros((len(indices), self._global_dim), dtype=np.float32)
-        nth_done = np.ones(len(indices), dtype=np.float32)  # default: done (truncated window)
+        nth_done = np.ones(len(indices), dtype=np.float32)
+        nth_mask = np.zeros((len(indices), self.action_dim), dtype=np.float32)
 
         for b, idx in enumerate(indices):
             ret = 0.0
@@ -164,8 +162,9 @@ class ReplayBuffer:
                 nth_local[b] = self.next_local_maps[n_idx]
                 nth_global[b] = self.next_global_features[n_idx]
                 nth_done[b] = 0.0
+                nth_mask[b] = self.next_valid_masks[n_idx]
 
-        return n_returns, nth_local, nth_global, nth_done
+        return n_returns, nth_local, nth_global, nth_done, nth_mask
 
     def _is_cross_episode(self, start_idx: int, n_step: int) -> bool:
         """检查从 start_idx 开始的 n_step 窗口是否跨越 episode 边界。"""
