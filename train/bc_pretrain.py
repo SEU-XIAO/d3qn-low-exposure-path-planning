@@ -25,7 +25,7 @@ from models.policy_network import HybridPolicyNetwork
 from planner.visibility_astar import VisibilityAwareAStarPlanner
 
 GAMMA = TrainingDefaults().gamma  # 0.99，与 DQN 一致
-CE_WEIGHT = 0.1  # CE 损失权重，保证 expert action 排第一
+CE_WEIGHT = 1.0  # CE 损失权重，与 MSE 平衡（MSE 校准量级，CE 保序）
 
 
 def generate_expert_data(episodes: int = 2000) -> list[dict[str, np.ndarray]]:
@@ -172,6 +172,8 @@ def train_bc(
         avg_mse = total_mse / n
         avg_ce = total_ce / n
         print(f"  Epoch {epoch + 1:3d}/{epochs} | mse={avg_mse:.4f} | ce={avg_ce:.4f} | acc={acc:.4f}")
+
+    return net
 
 
 def save_bc_checkpoint(net: HybridPolicyNetwork, path: str) -> None:
