@@ -19,7 +19,7 @@ import torch
 from torch import nn
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from config import EnvConfig, TrainingDefaults
+from config import EnvConfig, ModelConfig, TrainingDefaults
 from env.battlefield_env import BattlefieldEnv
 from models.policy_network import HybridPolicyNetwork
 from planner.visibility_astar import VisibilityAwareAStarPlanner
@@ -33,6 +33,7 @@ def _process_path(
     path: list[tuple[int, int]],
     goal_pos: np.ndarray,
     sp: float, vp: float, pw: float, gr: float,
+    use_waypoints: bool = False,
 ) -> list[dict]:
     """将一条 A* 路径转换为带 MC 回报的 step records。"""
     step_records: list[dict] = []
@@ -46,6 +47,8 @@ def _process_path(
             break
 
         env.agent_position = np.array(current, dtype=np.int32)
+        if use_waypoints:
+            env.current_subgoal = env.goal_position.copy()
         obs = env.get_observation()
         move_cost = 1.414 if move[0] != 0 and move[1] != 0 else 1.0
         vis = float(env.visibility_map[tuple(nxt)])
@@ -78,6 +81,7 @@ def _process_path(
 def generate_expert_data(
     episodes: int = 2000,
     augment_samples: int = 5,
+    use_waypoints: bool = False,
 ) -> list[dict[str, np.ndarray]]:
     """生成专家轨迹数据集，每步附带 Monte Carlo 回报。
 
@@ -94,7 +98,8 @@ def generate_expert_data(
     pw = config.progress_weight
     gr = config.goal_reward
 
-    print(f"生成专家数据 (目标 {episodes} 条主路径, 每条增强 {augment_samples} 个随机起点)...")
+    wp_label = " (航点模式: subgoal=goal)" if use_waypoints else ""
+    print(f"生成专家数据 (目标 {episodes} 条主路径, 每条增强 {augment_samples} 个随机起点){wp_label}...")
     for seed in range(1000, 1000 + episodes * 3):
         if path_count >= episodes:
             break
@@ -102,6 +107,10 @@ def generate_expert_data(
             obs = env.reset(scene_seed=seed, scenario_mode="full_map")
         except RuntimeError:
             continue
+
+        # 航点模式下 BC 预训练：subgoal = goal，让航点特征与目标特征等价
+        if use_waypoints:
+            env.current_subgoal = env.goal_position.copy()
 
         planner = VisibilityAwareAStarPlanner(env, visible_weight=3.0)
         result = planner.plan()
@@ -113,7 +122,7 @@ def generate_expert_data(
         original_goal = tuple(result.path[-1])
 
         # 处理主路径
-        for rec in _process_path(env, result.path, goal_pos, sp, vp, pw, gr):
+        for rec in _process_path(env, result.path, goal_pos, sp, vp, pw, gr, use_waypoints):
             dataset.append(rec)
 
         # 随机采样增强起点，跑 A* 到同一终点
@@ -123,7 +132,6 @@ def generate_expert_data(
                         for y in range(config.grid_size)
                         if window_tag[x, y] == 0]
             n_samples = min(augment_samples, len(passable))
-            # 固定随机数确保可重复
             rng = np.random.RandomState(seed + 1000000)
             chosen = [passable[i] for i in rng.choice(len(passable), size=n_samples, replace=False)]
 
@@ -132,7 +140,7 @@ def generate_expert_data(
                     continue
                 aug_result = planner.plan(start=aug_start, goal=original_goal)
                 if aug_result.success and len(aug_result.path) >= 2:
-                    for rec in _process_path(env, aug_result.path, goal_pos, sp, vp, pw, gr):
+                    for rec in _process_path(env, aug_result.path, goal_pos, sp, vp, pw, gr, use_waypoints):
                         dataset.append(rec)
 
         path_count += 1
@@ -150,9 +158,11 @@ def train_bc(
     lr: float = 1e-3,
     batch_size: int = 512,
     device: str = "cuda",
+    model_config: ModelConfig | None = None,
 ) -> HybridPolicyNetwork:
     """BC 训练：MSE 回归 MC 回报 + 小权重 CE 保序。"""
-    net = HybridPolicyNetwork(action_dim=8)
+    mc = model_config or ModelConfig()
+    net = HybridPolicyNetwork(action_dim=8, config=mc)
     if device.startswith("cuda") and torch.cuda.is_available():
         net = net.to(device)
     else:
@@ -234,12 +244,16 @@ def main() -> None:
     parser.add_argument("--output", type=str, default="artifacts/ddqn_bc.pt")
     parser.add_argument("--augment", type=int, default=TrainingDefaults().bc_augment_samples,
                         help="每条路径的随机起点增强数")
+    parser.add_argument("--use-waypoints", action="store_true", help="启用航点模式 (subgoal=goal)")
     args = parser.parse_args()
 
-    dataset = generate_expert_data(args.episodes, augment_samples=args.augment)
+    dataset = generate_expert_data(args.episodes, augment_samples=args.augment,
+                                   use_waypoints=args.use_waypoints)
 
+    model_config = ModelConfig(local_channels=6, global_feature_dim=12) if args.use_waypoints else None
     net = train_bc(dataset, epochs=args.epochs, lr=args.lr,
-                   batch_size=args.batch_size, device=args.device)
+                   batch_size=args.batch_size, device=args.device,
+                   model_config=model_config)
     save_bc_checkpoint(net, args.output)
 
 

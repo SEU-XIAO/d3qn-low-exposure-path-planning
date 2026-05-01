@@ -7,7 +7,7 @@ import numpy as np
 import torch
 from torch import nn
 
-from config import ExplorationConfig, TrainingDefaults
+from config import ExplorationConfig, ModelConfig, TrainingDefaults, WaypointConfig
 from env.battlefield_env import BattlefieldEnv
 from models.policy_network import HybridPolicyNetwork
 from planner.visibility_astar import VisibilityAwareAStarPlanner
@@ -40,6 +40,7 @@ class TrainingConfig:
     per_beta_end: float = TrainingDefaults().per_beta_end
     per_epsilon: float = TrainingDefaults().per_epsilon
     her_relabel_count: int = TrainingDefaults().her_relabel_count
+    waypoint: WaypointConfig = field(default_factory=lambda: TrainingDefaults().waypoint)
     seed: int = TrainingDefaults().seed
     exploration: ExplorationConfig = field(default_factory=lambda: TrainingDefaults().exploration)
     early_stop_enabled: bool = TrainingDefaults().early_stop_enabled
@@ -59,12 +60,17 @@ class DoubleDQNAgent:
         self.action_dim = action_dim
         self.exploration = self.config.exploration
 
-        self.online_net = HybridPolicyNetwork(action_dim=self.action_dim).to(self.device)
-        self.target_net = HybridPolicyNetwork(action_dim=self.action_dim).to(self.device)
+        wp = self.config.waypoint
+        lc = 6 if wp.enabled else 5
+        gd = 12 if wp.enabled else 8
+        model_config = ModelConfig(local_channels=lc, global_feature_dim=gd)
+
+        self.online_net = HybridPolicyNetwork(action_dim=self.action_dim, config=model_config).to(self.device)
+        self.target_net = HybridPolicyNetwork(action_dim=self.action_dim, config=model_config).to(self.device)
         self.target_net.load_state_dict(self.online_net.state_dict())
         self.target_net.eval()
 
-        self.bc_net = HybridPolicyNetwork(action_dim=self.action_dim).to(self.device)
+        self.bc_net = HybridPolicyNetwork(action_dim=self.action_dim, config=model_config).to(self.device)
         self.bc_net.load_state_dict(self.online_net.state_dict())
         for p in self.bc_net.parameters():
             p.requires_grad = False
@@ -72,7 +78,10 @@ class DoubleDQNAgent:
 
         self.optimizer = torch.optim.Adam(self.online_net.parameters(), lr=self.config.learning_rate)
         self.loss_fn = nn.SmoothL1Loss()
-        self.replay_buffer = ReplayBuffer(self.config.replay_capacity, self.action_dim)
+        self.replay_buffer = ReplayBuffer(
+            self.config.replay_capacity, self.action_dim,
+            local_map_channels=lc, global_feature_dim=gd,
+        )
         self.training_steps = 0
         self.last_loss = 0.0
         self.episode_action_stats = {
@@ -148,13 +157,13 @@ class DoubleDQNAgent:
 
     def _teacher_action(self, env: BattlefieldEnv, global_step: int) -> int | None:
         start = tuple(env.agent_position.tolist())
-        goal = tuple(env.goal_position.tolist())
+        target = tuple(env.current_subgoal.tolist()) if env.current_subgoal is not None else tuple(env.goal_position.tolist())
         teacher_lambda = self._anneal_probability(
             self.exploration.teacher_lambda_start,
             self.exploration.teacher_lambda_end,
             global_step,
         )
-        result = VisibilityAwareAStarPlanner(env, visible_weight=teacher_lambda).plan(start=start, goal=goal)
+        result = VisibilityAwareAStarPlanner(env, visible_weight=teacher_lambda).plan(start=start, goal=target)
         if not result.success or len(result.path) < 2:
             return None
 
@@ -167,9 +176,9 @@ class DoubleDQNAgent:
 
     def _heuristic_action_subset(self, env: BattlefieldEnv, valid_actions: list[int]) -> list[int]:
         current = env.agent_position
-        goal = env.goal_position
-        dx = int(goal[0] - current[0])
-        dy = int(goal[1] - current[1])
+        target = env.current_subgoal if env.current_subgoal is not None else env.goal_position
+        dx = int(target[0] - current[0])
+        dy = int(target[1] - current[1])
 
         preferred: set[int] = set()
         for action_idx in valid_actions:

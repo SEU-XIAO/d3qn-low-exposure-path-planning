@@ -9,6 +9,7 @@ from typing import Callable
 import numpy as np
 
 from env.battlefield_env import BattlefieldEnv
+from planner.visibility_astar import VisibilityAwareAStarPlanner
 from train.dqn_agent import DoubleDQNAgent, TrainingConfig
 
 
@@ -41,6 +42,9 @@ def train(config: TrainingConfig | None = None, bc_pretrain_path: str = "artifac
 
     log(f"训练设备: {agent.device}")
     log(f"训练日志: {log_path}")
+    use_waypoints = config.waypoint.enabled
+    if use_waypoints:
+        log(f"航点模式: interval={config.waypoint.interval} max_segment_multiplier={config.waypoint.max_segment_multiplier}")
 
     global_step = 0
     best_eval_reward = float("-inf")
@@ -59,43 +63,52 @@ def train(config: TrainingConfig | None = None, bc_pretrain_path: str = "artifac
             episode_loss: list[float] = []
             success = False
 
-            # HER 轨迹追踪
-            episode_positions: list[tuple[int, int]] = [tuple(env.agent_position.tolist())]
-            episode_transitions: list[tuple] = []
-
-            while not done:
-                epsilon = agent.current_epsilon(global_step)
-                action = agent.select_action(observation, epsilon, env=env, global_step=global_step)
-                result = env.step(action)
-                next_valid_actions = env.get_valid_actions()
-                agent.store_transition(
-                    observation,
-                    action,
-                    result.reward,
-                    result.observation,
-                    result.done,
-                    next_valid_actions=next_valid_actions,
+            if use_waypoints:
+                # 航点模式：先生成 A* 路径并采样航点
+                waypoints = _generate_waypoints(env, config)
+                segment_reward, segment_loss, done, success, global_step = _run_waypoint_episode(
+                    env, agent, waypoints, config, global_step, log,
                 )
+                episode_reward += segment_reward
+                episode_loss.extend(segment_loss)
+            else:
+                # 标准模式：单段 episode
+                episode_positions: list[tuple[int, int]] = [tuple(env.agent_position.tolist())]
+                episode_transitions: list[tuple] = []
 
-                episode_positions.append(tuple(env.agent_position.tolist()))
-                episode_transitions.append((
-                    observation, action, result.reward,
-                    result.observation, result.done, next_valid_actions,
-                ))
+                while not done:
+                    epsilon = agent.current_epsilon(global_step)
+                    action = agent.select_action(observation, epsilon, env=env, global_step=global_step)
+                    result = env.step(action)
+                    next_valid_actions = env.get_valid_actions()
+                    agent.store_transition(
+                        observation,
+                        action,
+                        result.reward,
+                        result.observation,
+                        result.done,
+                        next_valid_actions=next_valid_actions,
+                    )
 
-                observation = result.observation
-                episode_reward += result.reward
-                done = result.done
-                success = bool(result.info["success"])
-                global_step += 1
+                    episode_positions.append(tuple(env.agent_position.tolist()))
+                    episode_transitions.append((
+                        observation, action, result.reward,
+                        result.observation, result.done, next_valid_actions,
+                    ))
 
-                if global_step >= config.warmup_steps and global_step % config.train_frequency == 0 and agent.can_train(config.batch_size):
-                    episode_loss.append(agent.train_step(config.batch_size))
+                    observation = result.observation
+                    episode_reward += result.reward
+                    done = result.done
+                    success = bool(result.info["success"])
+                    global_step += 1
 
-            # HER: 失败 episode 用已访问位置重新标记奖励
-            if not success:
-                _relabel_her(agent, env, episode_positions, episode_transitions,
-                             k=config.her_relabel_count, log_fn=log)
+                    if global_step >= config.warmup_steps and global_step % config.train_frequency == 0 and agent.can_train(config.batch_size):
+                        episode_loss.append(agent.train_step(config.batch_size))
+
+                # HER: 失败 episode 用已访问位置重新标记奖励（航点模式关闭）
+                if not success:
+                    _relabel_her(agent, env, episode_positions, episode_transitions,
+                                 k=config.her_relabel_count, log_fn=log)
 
             recent_rewards.append(episode_reward)
             if len(recent_rewards) > 20:
@@ -124,6 +137,7 @@ def train(config: TrainingConfig | None = None, bc_pretrain_path: str = "artifac
                     scene_seeds=env.config.val_scene_seeds[: config.early_stop_eval_episodes],
                     scenario_mode=env.config.scenario_mode,
                     log_fn=log,
+                    use_waypoints=use_waypoints,
                 )
 
                 selection_summary: dict[str, float] | None = None
@@ -136,6 +150,7 @@ def train(config: TrainingConfig | None = None, bc_pretrain_path: str = "artifac
                         scene_seeds=env.config.val_scene_seeds,
                         scenario_mode=env.config.scenario_mode,
                         log_fn=log,
+                        use_waypoints=use_waypoints,
                     )
                     log(
                         f"[Eval-Full] scenes={len(env.config.val_scene_seeds)} | "
@@ -187,6 +202,100 @@ def train(config: TrainingConfig | None = None, bc_pretrain_path: str = "artifac
         log_fp.close()
 
 
+def _generate_waypoints(env: BattlefieldEnv, config: TrainingConfig) -> list[tuple[int, int]]:
+    """用 A* 生成完整路径并等间隔采样航点。"""
+    start = tuple(env.agent_position.tolist())
+    goal = tuple(env.goal_position.tolist())
+    try:
+        result = VisibilityAwareAStarPlanner(env, visible_weight=0.0).plan(start=start, goal=goal)
+        if result.success and len(result.path) >= 2:
+            return _sample_waypoints(result.path, config.waypoint.interval)
+    except Exception:
+        pass
+    # A* 失败时直接用终点作为唯一航点
+    return [goal]
+
+
+def _sample_waypoints(path: list[tuple[int, int]], interval: int) -> list[tuple[int, int]]:
+    """沿 A* 路径每隔 interval 步采样一个航点，最后一个一定是终点。"""
+    waypoints: list[tuple[int, int]] = []
+    for i in range(interval, len(path), interval):
+        waypoints.append(path[i])
+    if not waypoints or waypoints[-1] != path[-1]:
+        waypoints.append(path[-1])
+    return waypoints
+
+
+def _run_waypoint_episode(
+    env: BattlefieldEnv,
+    agent: DoubleDQNAgent,
+    waypoints: list[tuple[int, int]],
+    config: TrainingConfig,
+    global_step: int,
+    log_fn: Callable[[str], None],
+) -> tuple[float, list[float], bool, bool]:
+    """运行一个航点式 episode：逐段导航到每个航点。
+
+    Returns:
+        (total_reward, loss_list, done, success, final_global_step)
+    """
+    wp = config.waypoint
+    max_segment_steps = int(wp.interval * wp.max_segment_multiplier)
+    total_reward = 0.0
+    losses: list[float] = []
+    success = False
+    gs = global_step
+    total_waypoints = len(waypoints)
+
+    for wp_idx, waypoint in enumerate(waypoints):
+        is_final = (wp_idx == total_waypoints - 1)
+        env.set_subgoal(waypoint, is_final=is_final)
+        observation = env.get_observation()
+
+        segment_steps = 0
+        segment_done = False
+
+        while not segment_done and segment_steps < max_segment_steps:
+            epsilon = agent.current_epsilon(gs)
+            action = agent.select_action(observation, epsilon, env=env, global_step=gs)
+            result = env.step(action)
+            next_valid_actions = env.get_valid_actions()
+            agent.store_transition(
+                observation,
+                action,
+                result.reward,
+                result.observation,
+                result.done,
+                next_valid_actions=next_valid_actions,
+            )
+
+            observation = result.observation
+            total_reward += result.reward
+            segment_steps += 1
+            gs += 1
+            segment_done = result.done
+
+            if result.info["success"]:
+                success = True
+            if result.info["waypoint_reached"]:
+                break  # 到达航点，进入下一段
+
+            if gs >= config.warmup_steps and gs % config.train_frequency == 0 and agent.can_train(config.batch_size):
+                losses.append(agent.train_step(config.batch_size))
+
+        if segment_done:
+            return total_reward, losses, True, success, gs
+
+        if segment_steps >= max_segment_steps:
+            total_reward -= wp.segment_timeout_penalty
+            log_fn(f"  [WP] wp={wp_idx + 1}/{total_waypoints} timeout after {segment_steps} steps")
+            return total_reward, losses, True, False, gs
+
+        log_fn(f"  [WP] wp={wp_idx + 1}/{total_waypoints} reached in {segment_steps} steps")
+
+    return total_reward, losses, True, success, gs
+
+
 def _relabel_her(
     agent: DoubleDQNAgent,
     env: BattlefieldEnv,
@@ -195,16 +304,12 @@ def _relabel_her(
     k: int,
     log_fn: Callable[[str], None] | None = None,
 ) -> None:
-    """HER 'future': 失败 episode 中，对每步采样未来位置，若动作靠近未来位置则加进度奖励。
-
-    相比随机伪目标，future 策略让 agent 学到"朝自己实际到达过的地方走就是好的"，
-    提供更密集且相关的正向反馈。
-    """
+    """HER 'future': 失败 episode 中，对每步采样未来位置，若动作靠近未来位置则加进度奖励。"""
     T = len(transitions)
     if T < 3 or k <= 0:
         return
 
-    progress_reward = env.config.goal_reward * 0.05  # 每步进度奖励 = 终点奖励 5%
+    progress_reward = env.config.goal_reward * 0.05
     relabeled = 0
 
     for t in range(T - 1):
@@ -212,7 +317,6 @@ def _relabel_her(
         current_pos = np.array(positions[t], dtype=np.float32)
         next_pos = np.array(positions[t + 1], dtype=np.float32)
 
-        # 从 t+2 之后的未来位置中采样
         future_candidates = positions[t + 2:]
         if not future_candidates:
             continue
@@ -241,6 +345,7 @@ def evaluate_policy(
     scene_seeds: tuple[int, ...] | list[int] | None = None,
     scenario_mode: str = "fixed",
     log_fn: Callable[[str], None] | None = None,
+    use_waypoints: bool = False,
 ) -> dict[str, float]:
     rewards: list[float] = []
     hidden_ratios: list[float] = []
@@ -249,20 +354,28 @@ def evaluate_policy(
     seeds = tuple(scene_seeds) if scene_seeds is not None else tuple([None] * 3)
 
     for scene_seed in seeds:
-        observation = env.reset(scene_seed=scene_seed, scenario_mode=scenario_mode)
-        done = False
-        episode_reward = 0.0
+        env.reset(scene_seed=scene_seed, scenario_mode=scenario_mode)
 
-        while not done:
-            action = agent.select_action_masked(observation, env=env)
-            result = env.step(action)
-            observation = result.observation
-            episode_reward += result.reward
-            done = result.done
-            if result.done and bool(result.info["success"]):
-                successes += 1
+        if use_waypoints:
+            waypoints = _generate_waypoints(env, agent.config)
+            total_reward, _, success = _eval_waypoint_episode(env, agent, waypoints)
+        else:
+            observation = env.get_observation()
+            done = False
+            total_reward = 0.0
+            success = False
+            while not done:
+                action = agent.select_action_masked(observation, env=env)
+                result = env.step(action)
+                observation = result.observation
+                total_reward += result.reward
+                done = result.done
+                if result.done and bool(result.info["success"]):
+                    success = True
 
-        rewards.append(episode_reward)
+        if success:
+            successes += 1
+        rewards.append(total_reward)
         hidden_ratios.append(env.hidden_ratio)
         path_lengths.append(env.total_path_length)
 
@@ -287,6 +400,45 @@ def evaluate_policy(
     }
 
 
+def _eval_waypoint_episode(
+    env: BattlefieldEnv,
+    agent: DoubleDQNAgent,
+    waypoints: list[tuple[int, int]],
+) -> tuple[float, bool, bool]:
+    """评估用：运行一个航点式 episode（关闭探索）。"""
+    wp = agent.config.waypoint
+    max_segment_steps = int(wp.interval * wp.max_segment_multiplier)
+    total_reward = 0.0
+    success = False
+    total_waypoints = len(waypoints)
+
+    for wp_idx, waypoint in enumerate(waypoints):
+        is_final = (wp_idx == total_waypoints - 1)
+        env.set_subgoal(waypoint, is_final=is_final)
+        observation = env.get_observation()
+
+        segment_steps = 0
+        while segment_steps < max_segment_steps:
+            action = agent.select_action_masked(observation, env=env)
+            result = env.step(action)
+            observation = result.observation
+            total_reward += result.reward
+            segment_steps += 1
+
+            if result.info["success"]:
+                success = True
+                return total_reward, True, True
+            if result.info["waypoint_reached"]:
+                break
+            if result.done:
+                return total_reward, True, success
+
+        if segment_steps >= max_segment_steps:
+            return total_reward, True, False
+
+    return total_reward, True, success
+
+
 def config_default_eval_count() -> int:
     return TrainingConfig().early_stop_eval_episodes
 
@@ -305,4 +457,23 @@ def _is_better_eval(
 
 
 if __name__ == "__main__":
-    train()
+    import argparse
+    parser = argparse.ArgumentParser(description="Train D3QN agent")
+    parser.add_argument("--use-waypoints", action="store_true", help="Enable waypoint-based hierarchical RL")
+    parser.add_argument("--bc-path", default="artifacts/ddqn_bc.pt", help="BC pretrain checkpoint path")
+    parser.add_argument("--episodes", type=int, default=None, help="Override training episodes")
+    args = parser.parse_args()
+
+    cfg = TrainingConfig()
+    if args.use_waypoints:
+        from config import WaypointConfig
+        cfg = TrainingConfig(
+            waypoint=WaypointConfig(enabled=True),
+        )
+    if args.episodes is not None:
+        cfg = TrainingConfig(
+            episodes=args.episodes,
+            waypoint=cfg.waypoint,
+        )
+
+    train(config=cfg, bc_pretrain_path=args.bc_path)

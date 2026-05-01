@@ -93,6 +93,8 @@ class EnvConfig:
     visible_penalty: float = 0.4
     # 到达目标的终点奖励。
     goal_reward: float = 100.0
+    # 到达中间航点的奖励（航点模式）。
+    waypoint_reached_reward: float = 10.0
     # 成功后按隐蔽比例追加的奖励权重（终局结算，不干扰过程决策）。
     success_hidden_ratio_weight: float = 5.0
     # 撞到障碍的惩罚。
@@ -129,6 +131,21 @@ class ExplorationConfig:
     teacher_lambda_start: float = 12.0
     # Teacher Visibility-A* 的 λ 结束值。
     teacher_lambda_end: float = 3.0
+
+
+@dataclass(frozen=True)
+class WaypointConfig:
+    """航点式分层决策配置。"""
+    # 是否启用航点模式。
+    enabled: bool = False
+    # 沿 A* 路径每隔 N 步采样一个航点。
+    interval: int = 25
+    # 每段最多走 interval * multiplier 步，超时则段失败。
+    max_segment_multiplier: float = 2.0
+    # 到达中间航点的奖励。
+    waypoint_reached_reward: float = 10.0
+    # 段超时的惩罚。
+    segment_timeout_penalty: float = 20.0
 
 
 @dataclass(frozen=True)
@@ -183,6 +200,8 @@ class TrainingDefaults:
     bc_augment_samples: int = 5
     # HER 重新标记：失败 episode 中用多少个"已到达位置"作为伪目标。
     her_relabel_count: int = 4
+    # 航点式分层决策配置。
+    waypoint: WaypointConfig = field(default_factory=WaypointConfig)
     # 随机种子。
     seed: int = 42
     # 探索相关配置集合。

@@ -29,7 +29,16 @@
       "Bash(python -c \"from config import TrainingDefaults; t=TrainingDefaults\\(\\); print\\(f'lr={t.learning_rate}, warmup={t.warmup_steps}, grad_norm={t.max_gradient_norm}'\\)\")",
       "Bash(python -c \"from train.bc_pretrain import generate_expert_data, train_bc, save_bc_checkpoint; print\\('OK'\\)\")",
       "Bash(python -c \"from train.dqn_agent import DoubleDQNAgent, TrainingConfig; a=DoubleDQNAgent\\(action_dim=8\\); print\\(f'n_step={a.config.n_step}, bc_reg={a.config.bc_reg_weight}'\\); print\\('OK'\\)\")",
-      "Bash(python -c \"from train.dqn_agent import DoubleDQNAgent; print\\('OK'\\)\")"
+      "Bash(python -c \"from train.dqn_agent import DoubleDQNAgent; print\\('OK'\\)\")",
+      "Bash(python -c \"import sys; sys.path.insert\\(0, 'd:/井九/Documents/大三寒假/temp'\\); from config import TrainingDefaults; print\\(TrainingDefaults\\(\\).episodes\\)\")",
+      "Bash(python -c \"from planner.weighted_astar import ScalarizedVisibilityAStarPlanner; print\\('OK'\\)\")",
+      "Bash(python visualize/plot_scene.py)",
+      "Bash(MPLBACKEND=Agg python visualize/plot_scene.py)",
+      "Bash(python -m visualize.plot_episode --seed 7201 --mode random)",
+      "Bash(python -m visualize.plot_episode --seed 42 --mode fixed --comparison)",
+      "Bash(python -m visualize.plot_scene)",
+      "Bash(timeout 30 python -m visualize.plot_episode --seed 42 --mode fixed)",
+      "Bash(python -m visualize.plot_episode --seed 42 --mode fixed)"
     ]
   }
 }

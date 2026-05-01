@@ -5,15 +5,17 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap
 from matplotlib.patches import Rectangle
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from env.battlefield_env import BattlefieldEnv
 
 
 def _compute_fov_masks(env: BattlefieldEnv) -> tuple[np.ndarray, np.ndarray]:
     visible_mask = env.visibility_map > 0.5
     occluded_mask = ~visible_mask
-    ex, ey = int(env.enemy_position[0]), int(env.enemy_position[1])
-    occluded_mask[ex, ey] = False
+    ex = int(env.enemy_position[0]) - env.window_offset[0]
+    ey = int(env.enemy_position[1]) - env.window_offset[1]
+    if 0 <= ex < env.grid_size and 0 <= ey < env.grid_size:
+        occluded_mask[ex, ey] = False
     return visible_mask, occluded_mask
 
 
@@ -78,13 +80,18 @@ def draw_3d_scene(ax: plt.Axes, env: BattlefieldEnv) -> None:
 
     start = env.agent_position.astype(np.float32)
     goal = env.goal_position.astype(np.float32)
-    enemy = env.enemy_position.astype(np.float32)
+    enemy_global = env.enemy_position.astype(np.float32)
+    ex = enemy_global[0] - float(env.window_offset[0])
+    ey = enemy_global[1] - float(env.window_offset[1])
+    ez = enemy_global[2]
     start_h = float(env.height_map[int(start[0]), int(start[1])])
     goal_h = float(env.height_map[int(goal[0]), int(goal[1])])
 
     ax.scatter(start[0] + 0.4, start[1] + 0.4, start_h + 0.45, color="green", s=80, label="Start")
     ax.scatter(goal[0] + 0.4, goal[1] + 0.4, goal_h + 0.45, color="blue", s=80, label="Goal")
-    ax.scatter(enemy[0] + 0.4, enemy[1] + 0.4, enemy[2] + 0.3, color="red", s=90, label="Enemy Lookout")
+    if 0 <= ex < config.grid_size and 0 <= ey < config.grid_size:
+        enemy_h = float(height_map[int(ex), int(ey)])
+        ax.scatter(ex + 0.4, ey + 0.4, enemy_h + 0.3, color="red", s=90, label="Enemy Lookout")
 
     _plot_3d_floor_grid(ax, env)
     ax.set_xlabel("X")
@@ -138,64 +145,36 @@ def _plot_reference_path(ax: plt.Axes, start: np.ndarray, goal: np.ndarray) -> N
 
 
 def _plot_topdown_scene(ax: plt.Axes, env: BattlefieldEnv, title: str) -> None:
-    visible_mask, occluded_mask = _compute_fov_masks(env)
-    visible = np.ma.masked_where(~visible_mask, env.visibility_map)
-    occluded = np.ma.masked_where(~occluded_mask, np.ones_like(env.visibility_map, dtype=np.float32))
+    vis_binary = (env.visibility_map > 0.5).astype(np.float32)
     edge_values = np.arange(env.grid_size + 1, dtype=np.float32) - 0.5
+    cmap = ListedColormap(["#6b8a9e", "#e85d5d"])
     ax.pcolormesh(
-        edge_values,
-        edge_values,
-        occluded.T,
-        cmap="Greys",
-        shading="flat",
-        alpha=0.22,
-        vmin=0.0,
-        vmax=1.0,
-        zorder=1,
-    )
-    ax.pcolormesh(
-        edge_values,
-        edge_values,
-        visible.T,
-        cmap="Reds",
-        shading="flat",
-        alpha=0.32,
-        vmin=0.0,
-        vmax=1.0,
-        zorder=2,
+        edge_values, edge_values, vis_binary.T,
+        cmap=cmap, shading="flat", vmin=0, vmax=1, alpha=0.82, zorder=1,
     )
 
     obstacle_cells = np.argwhere(env.height_map > 0)
     for x, y in obstacle_cells:
         ax.add_patch(
             Rectangle(
-                (x - 0.5, y - 0.5),
-                1.0,
-                1.0,
-                facecolor="#6f6f6f",
-                edgecolor="#4f4f4f",
-                linewidth=0.6,
-                alpha=0.85,
-                zorder=3,
+                (x - 0.5, y - 0.5), 1.0, 1.0,
+                facecolor="#373737", edgecolor="#252525",
+                linewidth=0.6, alpha=0.90, zorder=3,
             )
         )
 
     start = env.start_position
     goal = env.goal_position
-    enemy = env.enemy_position
+    ex = int(env.enemy_position[0]) - env.window_offset[0]
+    ey = int(env.enemy_position[1]) - env.window_offset[1]
 
     ax.scatter(start[0], start[1], color="green", s=110, label="Start", zorder=5)
     ax.scatter(goal[0], goal[1], color="blue", s=110, label="Goal", zorder=5)
-    ax.scatter(enemy[0], enemy[1], color="red", s=120, label="Enemy Lookout", zorder=5)
-    ax.text(
-        float(enemy[0]) + 0.5,
-        float(enemy[1]) + 0.6,
-        f"score={env.enemy_pose_score:.0f}\n{env.enemy_pose_source}",
-        fontsize=8.5,
-        color="#7a1f1f",
-        bbox={"boxstyle": "round,pad=0.2", "facecolor": "white", "alpha": 0.85, "edgecolor": "#ddbbbb"},
-        zorder=7,
-    )
+    if 0 <= ex < env.grid_size and 0 <= ey < env.grid_size:
+        ax.scatter(ex, ey, color="red", s=120, label="Enemy Lookout", zorder=5)
+
+    ax.scatter([], [], marker="s", s=80, color="#e85d5d", alpha=0.88, label="FOV Visible")
+    ax.scatter([], [], marker="s", s=80, color="#6b8a9e", alpha=0.88, label="FOV Occluded")
 
     ax.set_title(title)
     ax.set_xlabel("X")
@@ -229,7 +208,7 @@ def _compute_direct_visibility_binary(env: BattlefieldEnv) -> np.ndarray:
 def _plot_binary_visibility_scene(ax: plt.Axes, env: BattlefieldEnv, title: str) -> None:
     binary_map = _compute_direct_visibility_binary(env)
     edge_values = np.arange(env.grid_size + 1, dtype=np.float32) - 0.5
-    cmap = ListedColormap(["#7f8c8d", "#ff9b9b"])
+    cmap = ListedColormap(["#6b8a9e", "#e85d5d"])
 
     ax.pcolormesh(
         edge_values,
@@ -264,8 +243,8 @@ def _plot_binary_visibility_scene(ax: plt.Axes, env: BattlefieldEnv, title: str)
         zorder=5,
     )
 
-    ax.scatter([], [], marker="s", s=80, color="#ff9b9b", alpha=0.95, label="Direct Visible")
-    ax.scatter([], [], marker="s", s=80, color="#7f8c8d", alpha=0.95, label="Direct Non-Visible")
+    ax.scatter([], [], marker="s", s=80, color="#e85d5d", alpha=0.95, label="Direct Visible")
+    ax.scatter([], [], marker="s", s=80, color="#6b8a9e", alpha=0.95, label="Direct Non-Visible")
 
     ax.set_title(title)
     ax.set_xlabel("X")

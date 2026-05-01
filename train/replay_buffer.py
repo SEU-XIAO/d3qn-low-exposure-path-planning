@@ -9,17 +9,18 @@ class ReplayBuffer:
     local_map 用 uint8 存储节省 4× 内存（输入值域 [0,1]）。
     """
 
-    def __init__(self, capacity: int, action_dim: int) -> None:
+    def __init__(self, capacity: int, action_dim: int,
+                 local_map_channels: int = 5, global_feature_dim: int = 8) -> None:
         self.capacity = capacity
         self.action_dim = action_dim
-        self._local_map_size = (5, 50, 50)
-        self._global_dim = 8
+        self._local_map_size = (local_map_channels, 50, 50)
+        self._global_dim = global_feature_dim
 
-        self.local_maps = np.zeros((capacity, 5, 50, 50), dtype=np.uint8)
+        self.local_maps = np.zeros((capacity, local_map_channels, 50, 50), dtype=np.uint8)
         self.global_features = np.zeros((capacity, self._global_dim), dtype=np.float32)
         self.actions = np.zeros(capacity, dtype=np.int64)
         self.rewards = np.zeros(capacity, dtype=np.float32)
-        self.next_local_maps = np.zeros((capacity, 5, 50, 50), dtype=np.uint8)
+        self.next_local_maps = np.zeros((capacity, local_map_channels, 50, 50), dtype=np.uint8)
         self.next_global_features = np.zeros((capacity, self._global_dim), dtype=np.float32)
         self.next_valid_masks = np.zeros((capacity, action_dim), dtype=np.float32)
         self.dones = np.zeros(capacity, dtype=np.bool_)
@@ -166,7 +167,7 @@ class ReplayBuffer:
         nth_valid_mask 是第 n 步状态的合法动作掩码。
         """
         n_returns = np.zeros(len(indices), dtype=np.float32)
-        nth_local = np.zeros((len(indices), 5, 50, 50), dtype=np.uint8)
+        nth_local = np.zeros((len(indices), self._local_map_size[0], 50, 50), dtype=np.uint8)
         nth_global = np.zeros((len(indices), self._global_dim), dtype=np.float32)
         nth_done = np.ones(len(indices), dtype=np.float32)
         nth_mask = np.zeros((len(indices), self.action_dim), dtype=np.float32)

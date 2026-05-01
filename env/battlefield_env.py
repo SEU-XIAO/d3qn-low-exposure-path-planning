@@ -54,6 +54,10 @@ class BattlefieldEnv:
         self.current_scene_seed: int | None = None
         self.current_scenario_mode = self.config.scenario_mode
 
+        # ---- 航点/子目标状态 ----
+        self.current_subgoal: np.ndarray | None = None
+        self.subgoal_is_active: bool = False
+
         # ---- 全图模式状态 ----
         self.full_terrain: FullTerrain | None = None
         self.enemy_pool: list[tuple[int, int]] = []  # 全局坐标的敌人候选位置列表
@@ -104,6 +108,8 @@ class BattlefieldEnv:
         self.total_path_length = 0.0
         self.visible_path_length = 0.0
         self.hidden_path_length = 0.0
+        self.current_subgoal = None
+        self.subgoal_is_active = False
 
         if scenario_mode is not None:
             self.current_scenario_mode = scenario_mode
@@ -132,12 +138,15 @@ class BattlefieldEnv:
         done = False
         collision = False
 
+        waypoint_reached = False
         if self._is_blocked(candidate):
             reward -= self.config.collision_penalty
             collision = True
             self.consecutive_collisions += 1
         else:
-            prev_dist = self._goal_distance(self.agent_position)
+            # 航点模式下用 subgoal 计算距离进度，否则用最终目标
+            dist_target = self.current_subgoal if self.current_subgoal is not None else self.goal_position
+            prev_dist = float(np.linalg.norm(dist_target.astype(np.float32) - self.agent_position.astype(np.float32)))
             self.agent_position = candidate
             self.consecutive_collisions = 0
             current_visibility = float(self.visibility_map[tuple(self.agent_position)])
@@ -145,8 +154,14 @@ class BattlefieldEnv:
             self.visible_path_length += move_cost * current_visibility
             self.hidden_path_length += move_cost * (1.0 - current_visibility)
             reward -= self.config.visible_penalty * move_cost * current_visibility
-            cur_dist = self._goal_distance(self.agent_position)
+            cur_dist = float(np.linalg.norm(dist_target.astype(np.float32) - self.agent_position.astype(np.float32)))
             reward += (prev_dist - cur_dist) * self.config.progress_weight
+
+            # 航点到达检测
+            if self.current_subgoal is not None and np.array_equal(self.agent_position, self.current_subgoal):
+                waypoint_reached = True
+                if self.subgoal_is_active:
+                    reward += self.config.waypoint_reached_reward
 
         current_hidden_ratio = self.hidden_ratio
 
@@ -177,6 +192,7 @@ class BattlefieldEnv:
                 "hidden_ratio": current_hidden_ratio,
                 "path_length": self.total_path_length,
                 "success": success,
+                "waypoint_reached": waypoint_reached,
             },
         )
 
@@ -191,6 +207,16 @@ class BattlefieldEnv:
         if self.total_path_length <= 1e-6:
             return 0.0
         return float(self.visible_path_length / self.total_path_length)
+
+    def set_subgoal(self, position: tuple[int, int], is_final: bool = False) -> None:
+        """设置当前导航子目标（航点或最终目标）。"""
+        self.current_subgoal = np.array(position, dtype=np.int32)
+        self.subgoal_is_active = not is_final
+
+    def clear_subgoal(self) -> None:
+        """清除当前子目标。"""
+        self.current_subgoal = None
+        self.subgoal_is_active = False
 
     def get_observation(self) -> dict[str, np.ndarray]:
         return {
@@ -730,7 +756,10 @@ class BattlefieldEnv:
             agent[tuple(self.agent_position)] = 1.0
             enemy_ch = np.zeros_like(occ, dtype=np.float32)
             enemy_ch[enemy_win_x, enemy_win_y] = 1.0
-            return np.stack((occ, vis, goal, agent, enemy_ch), axis=0).astype(np.float32)
+            waypoint_ch = np.zeros_like(occ, dtype=np.float32)
+            if self.current_subgoal is not None:
+                waypoint_ch[tuple(self.current_subgoal)] = 1.0
+            return np.stack((occ, vis, goal, agent, enemy_ch, waypoint_ch), axis=0).astype(np.float32)
 
         radius = size // 2
         padded_occ = np.pad(self.occupancy_map, radius, mode="constant", constant_values=1.0)
@@ -752,10 +781,18 @@ class BattlefieldEnv:
         if 0 <= enemy_lx < size and 0 <= enemy_ly < size:
             padded_enemy[ax - radius + enemy_lx, ay - radius + enemy_ly] = 1.0
 
+        padded_waypoint = np.pad(np.zeros_like(self.occupancy_map, dtype=np.float32), radius, mode="constant")
+        if self.current_subgoal is not None:
+            wpx = self.current_subgoal[0] - self.agent_position[0] + radius
+            wpy = self.current_subgoal[1] - self.agent_position[1] + radius
+            if 0 <= wpx < size and 0 <= wpy < size:
+                padded_waypoint[ax - radius + wpx, ay - radius + wpy] = 1.0
+
         xs = slice(ax - radius, ax + radius + 1)
         ys = slice(ay - radius, ay + radius + 1)
         return np.stack(
-            (padded_occ[xs, ys], padded_visibility[xs, ys], padded_goal[xs, ys], padded_agent[xs, ys], padded_enemy[xs, ys]),
+            (padded_occ[xs, ys], padded_visibility[xs, ys], padded_goal[xs, ys],
+             padded_agent[xs, ys], padded_enemy[xs, ys], padded_waypoint[xs, ys]),
             axis=0,
         ).astype(np.float32)
 
@@ -776,8 +813,19 @@ class BattlefieldEnv:
         current_visibility = np.array([self.visibility_map[tuple(self.agent_position)]], dtype=np.float32)
         hidden_ratio = np.array([self.hidden_ratio], dtype=np.float32)
 
+        # 航点特征 (4 维)
+        if self.current_subgoal is not None:
+            wp_relative = (self.current_subgoal.astype(np.float32) - self.agent_position.astype(np.float32)) / self.grid_size
+            wp_distance = np.array([np.linalg.norm(wp_relative)], dtype=np.float32)
+            wp_active = np.array([1.0], dtype=np.float32)
+        else:
+            wp_relative = np.zeros(2, dtype=np.float32)
+            wp_distance = np.array([0.0], dtype=np.float32)
+            wp_active = np.array([0.0], dtype=np.float32)
+
         return np.concatenate(
-            (relative_goal, relative_enemy, goal_distance, enemy_distance, current_visibility, hidden_ratio),
+            (relative_goal, relative_enemy, goal_distance, enemy_distance, current_visibility, hidden_ratio,
+             wp_relative, wp_distance, wp_active),
             dtype=np.float32,
         )
 
