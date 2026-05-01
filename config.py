@@ -139,9 +139,11 @@ class WaypointConfig:
     # 是否启用航点模式。
     enabled: bool = False
     # 沿 A* 路径每隔 N 步采样一个航点。
-    interval: int = 25
+    interval: int = 15
     # 每段最多走 interval * multiplier 步，超时则段失败。
-    max_segment_multiplier: float = 2.0
+    max_segment_multiplier: float = 3.0
+    # 航点生成时 Visibility-A* 的可见性权重（0=最短路径，>0=避开展露区）。
+    waypoint_visible_weight: float = 6.0
     # 到达中间航点的奖励。
     waypoint_reached_reward: float = 10.0
     # 段超时的惩罚。

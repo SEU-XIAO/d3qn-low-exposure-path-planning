@@ -207,7 +207,7 @@ def _generate_waypoints_viz(env: BattlefieldEnv, interval: int) -> list[tuple[in
     start = tuple(env.agent_position.tolist())
     goal = tuple(env.goal_position.tolist())
     try:
-        result = VisibilityAwareAStarPlanner(env, visible_weight=0.0).plan(start=start, goal=goal)
+        result = VisibilityAwareAStarPlanner(env, visible_weight=6.0).plan(start=start, goal=goal)
         if result.success and len(result.path) >= 2:
             waypoints: list[tuple[int, int]] = []
             for i in range(interval, len(result.path), interval):

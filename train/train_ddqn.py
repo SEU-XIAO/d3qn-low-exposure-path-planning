@@ -207,7 +207,7 @@ def _generate_waypoints(env: BattlefieldEnv, config: TrainingConfig) -> list[tup
     start = tuple(env.agent_position.tolist())
     goal = tuple(env.goal_position.tolist())
     try:
-        result = VisibilityAwareAStarPlanner(env, visible_weight=0.0).plan(start=start, goal=goal)
+        result = VisibilityAwareAStarPlanner(env, visible_weight=config.waypoint.waypoint_visible_weight).plan(start=start, goal=goal)
         if result.success and len(result.path) >= 2:
             return _sample_waypoints(result.path, config.waypoint.interval)
     except Exception:
