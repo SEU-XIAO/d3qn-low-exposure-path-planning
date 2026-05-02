@@ -50,6 +50,7 @@ class HybridPolicyNetwork(nn.Module):
                 num_layers=1,
                 batch_first=True,
             )
+            self.lstm_scale = nn.Parameter(torch.zeros(1))
             head_input = self.config.lstm_hidden_size
         else:
             self.lstm = None
@@ -86,7 +87,7 @@ class HybridPolicyNetwork(nn.Module):
 
         if self.use_lstm:
             lstm_out, new_hidden = self.lstm(fused.unsqueeze(1), hidden_state)
-            hidden = lstm_out.squeeze(1)  # [B, H]
+            hidden = fused + self.lstm_scale * lstm_out.squeeze(1)  # 残差：初始 scale=0，保留 BC 行为
             return self._dueling(hidden), new_hidden
 
         return self._dueling(fused)
@@ -104,7 +105,7 @@ class HybridPolicyNetwork(nn.Module):
             fused = self._encode(local_flat, global_flat)  # [B*T, 128]
             fused_seq = fused.view(B, T, -1)  # [B, T, 128]
             lstm_out, _ = self.lstm(fused_seq)  # [B, T, H]
-            return self._dueling(lstm_out)  # [B, T, A]
+            return self._dueling(fused_seq + self.lstm_scale * lstm_out)  # 残差连接
         else:
             local_flat = local_map.view(B * T, *local_map.shape[2:])
             global_flat = global_features.view(B * T, *global_features.shape[2:])
