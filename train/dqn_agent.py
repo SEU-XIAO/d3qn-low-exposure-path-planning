@@ -44,6 +44,7 @@ class TrainingConfig:
     seed: int = TrainingDefaults().seed
     exploration: ExplorationConfig = field(default_factory=lambda: TrainingDefaults().exploration)
     use_lstm: bool = TrainingDefaults().use_lstm
+    lstm_hidden_size: int = TrainingDefaults().lstm_hidden_size
     lstm_sequence_length: int = TrainingDefaults().lstm_sequence_length
     curriculum_enabled: bool = TrainingDefaults().curriculum_enabled
     curriculum_success_threshold: float = TrainingDefaults().curriculum_success_threshold
