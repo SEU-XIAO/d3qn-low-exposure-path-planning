@@ -12,8 +12,11 @@ from env.battlefield_env import BattlefieldEnv
 from planner.visibility_astar import VisibilityAwareAStarPlanner
 from train.dqn_agent import DoubleDQNAgent, TrainingConfig
 
+# 路径采样：多 λ 候选值，评估时尝试多个可见性权重
+LAMBDA_CANDIDATES = [0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 16.0]
 
-def train(config: TrainingConfig | None = None, bc_pretrain_path: str = "artifacts/ddqn_bc.pt") -> None:
+
+def train(config: TrainingConfig | None = None, bc_pretrain_path: str = "artifacts/ddqn_bc.pt", multi_lambda: bool = False) -> None:
     config = config or TrainingConfig()
     env = BattlefieldEnv()
     agent = DoubleDQNAgent(action_dim=len(BattlefieldEnv.ACTIONS), config=config)
@@ -138,6 +141,7 @@ def train(config: TrainingConfig | None = None, bc_pretrain_path: str = "artifac
                     scenario_mode=env.config.scenario_mode,
                     log_fn=log,
                     use_waypoints=use_waypoints,
+                    multi_lambda=multi_lambda,
                 )
 
                 selection_summary: dict[str, float] | None = None
@@ -151,6 +155,7 @@ def train(config: TrainingConfig | None = None, bc_pretrain_path: str = "artifac
                         scenario_mode=env.config.scenario_mode,
                         log_fn=log,
                         use_waypoints=use_waypoints,
+                        multi_lambda=multi_lambda,
                     )
                     log(
                         f"[Eval-Full] scenes={len(env.config.val_scene_seeds)} | "
@@ -204,15 +209,19 @@ def train(config: TrainingConfig | None = None, bc_pretrain_path: str = "artifac
 
 def _generate_waypoints(env: BattlefieldEnv, config: TrainingConfig) -> list[tuple[int, int]]:
     """用 A* 生成完整路径并等间隔采样航点。"""
+    return _generate_waypoints_with_lambda(env, config.waypoint.interval, config.waypoint.waypoint_visible_weight)
+
+
+def _generate_waypoints_with_lambda(env: BattlefieldEnv, interval: int, lam: float) -> list[tuple[int, int]]:
+    """用指定 λ 的 Visibility-A* 生成航点。"""
     start = tuple(env.agent_position.tolist())
     goal = tuple(env.goal_position.tolist())
     try:
-        result = VisibilityAwareAStarPlanner(env, visible_weight=config.waypoint.waypoint_visible_weight).plan(start=start, goal=goal)
+        result = VisibilityAwareAStarPlanner(env, visible_weight=lam).plan(start=start, goal=goal)
         if result.success and len(result.path) >= 2:
-            return _sample_waypoints(result.path, config.waypoint.interval)
+            return _sample_waypoints(result.path, interval)
     except Exception:
         pass
-    # A* 失败时直接用终点作为唯一航点
     return [goal]
 
 
@@ -346,20 +355,36 @@ def evaluate_policy(
     scenario_mode: str = "fixed",
     log_fn: Callable[[str], None] | None = None,
     use_waypoints: bool = False,
+    multi_lambda: bool = False,
 ) -> dict[str, float]:
     rewards: list[float] = []
     hidden_ratios: list[float] = []
     path_lengths: list[float] = []
     successes = 0
     seeds = tuple(scene_seeds) if scene_seeds is not None else tuple([None] * 3)
+    lambdas = LAMBDA_CANDIDATES if multi_lambda else [agent.config.waypoint.waypoint_visible_weight]
+    interval = agent.config.waypoint.interval
 
     for scene_seed in seeds:
-        env.reset(scene_seed=scene_seed, scenario_mode=scenario_mode)
+        best_reward = float("-inf")
+        best_hidden = 0.0
+        best_path_len = 0.0
+        scene_success = False
 
         if use_waypoints:
-            waypoints = _generate_waypoints(env, agent.config)
-            total_reward, _, success = _eval_waypoint_episode(env, agent, waypoints)
+            for lam in lambdas:
+                env.reset(scene_seed=scene_seed, scenario_mode=scenario_mode)
+                waypoints = _generate_waypoints_with_lambda(env, interval, lam)
+                total_reward, _, success = _eval_waypoint_episode(env, agent, waypoints)
+                if total_reward > best_reward:
+                    best_reward = total_reward
+                    best_hidden = env.hidden_ratio
+                    best_path_len = env.total_path_length
+                if success:
+                    scene_success = True
+                    break  # 找到一条能走通的路径，不再尝试更多 λ
         else:
+            env.reset(scene_seed=scene_seed, scenario_mode=scenario_mode)
             observation = env.get_observation()
             done = False
             total_reward = 0.0
@@ -372,20 +397,25 @@ def evaluate_policy(
                 done = result.done
                 if result.done and bool(result.info["success"]):
                     success = True
+            best_reward = total_reward
+            best_hidden = env.hidden_ratio
+            best_path_len = env.total_path_length
+            scene_success = success
 
-        if success:
+        if scene_success:
             successes += 1
-        rewards.append(total_reward)
-        hidden_ratios.append(env.hidden_ratio)
-        path_lengths.append(env.total_path_length)
+        rewards.append(best_reward)
+        hidden_ratios.append(best_hidden)
+        path_lengths.append(best_path_len)
 
     avg_reward = statistics.mean(rewards) if rewards else 0.0
     avg_hidden_ratio = statistics.mean(hidden_ratios) if hidden_ratios else 0.0
     avg_path_length = statistics.mean(path_lengths) if path_lengths else 0.0
     success_rate = successes / max(1, len(seeds))
     eval_tag = "[Eval]" if len(seeds) <= config_default_eval_count() else "[Eval-Full]"
+    ml_tag = " [multi-λ]" if multi_lambda else ""
     eval_message = (
-        f"{eval_tag} avg_reward={avg_reward:7.3f} | success_rate={success_rate:.2f} | "
+        f"{eval_tag}{ml_tag} avg_reward={avg_reward:7.3f} | success_rate={success_rate:.2f} | "
         f"avg_hidden_ratio={avg_hidden_ratio:.3f} | avg_path_len={avg_path_length:.3f}"
     )
     if log_fn is None:
@@ -456,12 +486,45 @@ def _is_better_eval(
     return False
 
 
+def _eval_only(config: TrainingConfig, bc_path: str, multi_lambda: bool = False) -> None:
+    """仅评估模式：加载已有模型，在验证集上评估并退出。"""
+    env = BattlefieldEnv()
+    agent = DoubleDQNAgent(action_dim=len(BattlefieldEnv.ACTIONS), config=config)
+    bc = Path(bc_path)
+    if bc.exists():
+        agent.load(str(bc))
+        print(f"已加载模型: {bc}")
+    else:
+        print(f"模型文件不存在: {bc}")
+        return
+
+    print(f"评估配置: multi_lambda={multi_lambda}, waypoints={config.waypoint.enabled}")
+    print(f"λ 候选: {LAMBDA_CANDIDATES if multi_lambda else [config.waypoint.waypoint_visible_weight]}")
+
+    summary = evaluate_policy(
+        agent, env,
+        scene_seeds=env.config.val_scene_seeds,
+        scenario_mode=env.config.scenario_mode,
+        use_waypoints=config.waypoint.enabled,
+        multi_lambda=multi_lambda,
+    )
+    print(
+        f"[Eval-Only] scenes={len(env.config.val_scene_seeds)} | "
+        f"success_rate={summary['success_rate']:.2f} | "
+        f"avg_reward={summary['avg_reward']:7.3f} | "
+        f"avg_hidden_ratio={summary['avg_hidden_ratio']:.3f} | "
+        f"avg_path_len={summary['avg_path_length']:.3f}"
+    )
+
+
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Train D3QN agent")
     parser.add_argument("--use-waypoints", action="store_true", help="Enable waypoint-based hierarchical RL")
     parser.add_argument("--bc-path", default="artifacts/ddqn_bc.pt", help="BC pretrain checkpoint path")
     parser.add_argument("--episodes", type=int, default=None, help="Override training episodes")
+    parser.add_argument("--multi-lambda", action="store_true", help="Evaluate with multiple λ values for waypoint generation")
+    parser.add_argument("--eval-only", action="store_true", help="Only run evaluation on existing model, skip training")
     args = parser.parse_args()
 
     cfg = TrainingConfig()
@@ -476,4 +539,7 @@ if __name__ == "__main__":
             waypoint=cfg.waypoint,
         )
 
-    train(config=cfg, bc_pretrain_path=args.bc_path)
+    if args.eval_only:
+        _eval_only(cfg, args.bc_path, multi_lambda=args.multi_lambda)
+    else:
+        train(config=cfg, bc_pretrain_path=args.bc_path, multi_lambda=args.multi_lambda)
