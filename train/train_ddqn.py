@@ -42,7 +42,7 @@ class CurriculumScheduler:
                     continue
                 x, y = gx + dx, gy + dy
                 if 0 <= x < env.grid_size and 0 <= y < env.grid_size:
-                    if not env.obstacle_map[x, y] and (x, y) != goal_pos:
+                    if env._cell_passable(x, y) and (x, y) != goal_pos:
                         candidates.append((x, y))
         if candidates:
             return random.choice(candidates)
