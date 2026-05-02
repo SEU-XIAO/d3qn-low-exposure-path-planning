@@ -197,6 +197,62 @@ class ReplayBuffer:
 
         return n_returns, nth_local, nth_global, nth_done, nth_mask
 
+    def sample_sequences(self, batch_size: int, seq_len: int
+                         ) -> dict[str, np.ndarray] | None:
+        """采样连续序列供 DRQN 训练。
+
+        返回形状为 (batch, seq_len, ...) 的字典，或 None（缓冲区不足时）。
+        每个序列不跨越 episode 边界。
+        """
+        if self._size < seq_len or batch_size == 0:
+            return None
+
+        # 找可用的序列起始索引（不跨越 episode 边界，且序列完全在缓冲区内）
+        valid_starts: list[int] = []
+        for i in range(self._size - seq_len + 1):
+            ok = True
+            for k in range(1, seq_len):
+                if self.episode_starts[(i + k) % self.capacity]:
+                    ok = False
+                    break
+            if ok:
+                valid_starts.append(i)
+
+        if len(valid_starts) < batch_size:
+            return None
+
+        starts = np.random.choice(valid_starts, size=batch_size, replace=False)
+
+        # 构建序列: (batch, seq_len, ...)
+        seq_indices = np.array([np.arange(s, s + seq_len) for s in starts], dtype=np.int64)
+
+        local_seq = self.local_maps[seq_indices].astype(np.float32) / 255.0
+        global_seq = self.global_features[seq_indices].astype(np.float32)
+        action_seq = self.actions[seq_indices].astype(np.int64)
+        reward_seq = self.rewards[seq_indices].astype(np.float32)
+        done_seq = self.dones[seq_indices].astype(np.float32)
+
+        # next_* 序列：每个位置指向下一步
+        next_indices = np.clip(seq_indices + 1, 0, self.capacity - 1)
+        next_local_seq = self.next_local_maps[next_indices].astype(np.float32) / 255.0
+        next_global_seq = self.next_global_features[next_indices].astype(np.float32)
+        mask_seq = self.next_valid_masks[next_indices].astype(np.float32)
+
+        # 每个序列最后一步的索引（用于 n-step TD target 计算）
+        last_indices = seq_indices[:, -1]
+
+        return {
+            "local_map": local_seq,
+            "global_features": global_seq,
+            "action": action_seq,
+            "reward": reward_seq,
+            "done": done_seq,
+            "next_local_map": next_local_seq,
+            "next_global_features": next_global_seq,
+            "next_valid_action_mask": mask_seq,
+            "last_indices": last_indices,
+        }
+
     def _is_cross_episode(self, start_idx: int, n_step: int) -> bool:
         """检查从 start_idx 开始的 n_step 窗口是否跨越 episode 边界。"""
         for k in range(1, n_step + 1):

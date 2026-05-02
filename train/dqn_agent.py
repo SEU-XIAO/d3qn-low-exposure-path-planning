@@ -43,6 +43,12 @@ class TrainingConfig:
     waypoint: WaypointConfig = field(default_factory=lambda: TrainingDefaults().waypoint)
     seed: int = TrainingDefaults().seed
     exploration: ExplorationConfig = field(default_factory=lambda: TrainingDefaults().exploration)
+    use_lstm: bool = TrainingDefaults().use_lstm
+    lstm_sequence_length: int = TrainingDefaults().lstm_sequence_length
+    curriculum_enabled: bool = TrainingDefaults().curriculum_enabled
+    curriculum_success_threshold: float = TrainingDefaults().curriculum_success_threshold
+    curriculum_window: int = TrainingDefaults().curriculum_window
+    curriculum_patience: int = TrainingDefaults().curriculum_patience
     early_stop_enabled: bool = TrainingDefaults().early_stop_enabled
     early_stop_eval_episodes: int = TrainingDefaults().early_stop_eval_episodes
     early_stop_success_rate_threshold: float = TrainingDefaults().early_stop_success_rate_threshold
@@ -63,7 +69,13 @@ class DoubleDQNAgent:
         wp = self.config.waypoint
         lc = 6 if wp.enabled else 5
         gd = 12 if wp.enabled else 8
-        model_config = ModelConfig(local_channels=lc, global_feature_dim=gd)
+        model_config = ModelConfig(
+            local_channels=lc, global_feature_dim=gd,
+            use_lstm=self.config.use_lstm,
+        )
+
+        self.use_lstm = self.config.use_lstm
+        self.lstm_seq_len = self.config.lstm_sequence_length
 
         self.online_net = HybridPolicyNetwork(action_dim=self.action_dim, config=model_config).to(self.device)
         self.target_net = HybridPolicyNetwork(action_dim=self.action_dim, config=model_config).to(self.device)
@@ -90,12 +102,22 @@ class DoubleDQNAgent:
             "teacher": 0,
             "random": 0,
         }
+        self._hidden_state: tuple[torch.Tensor, torch.Tensor] | None = None
 
         random.seed(self.config.seed)
         np.random.seed(self.config.seed)
         torch.manual_seed(self.config.seed)
 
     def select_action(self, observation: dict[str, np.ndarray], epsilon: float, env: BattlefieldEnv | None = None, global_step: int = 0) -> int:
+        self.online_net.eval()
+        with torch.no_grad():
+            local_map = torch.from_numpy(observation["local_map"]).unsqueeze(0).float().to(self.device)
+            global_features = torch.from_numpy(observation["global_features"]).unsqueeze(0).float().to(self.device)
+            if self.use_lstm:
+                q_values, self._hidden_state = self.online_net(local_map, global_features, self._hidden_state)
+            else:
+                q_values = self.online_net(local_map, global_features)
+
         if random.random() < epsilon:
             guided_action, source = self._select_guided_exploration_action(env, global_step)
             if guided_action is not None:
@@ -104,11 +126,6 @@ class DoubleDQNAgent:
             self.episode_action_stats["random"] += 1
             return random.randrange(self.action_dim)
 
-        self.online_net.eval()
-        with torch.no_grad():
-            local_map = torch.from_numpy(observation["local_map"]).unsqueeze(0).float().to(self.device)
-            global_features = torch.from_numpy(observation["global_features"]).unsqueeze(0).float().to(self.device)
-            q_values = self.online_net(local_map, global_features)
         if env is not None:
             valid_actions = env.get_valid_actions()
             q_values = self._mask_invalid_actions(q_values, valid_actions)
@@ -120,7 +137,10 @@ class DoubleDQNAgent:
         with torch.no_grad():
             local_map = torch.from_numpy(observation["local_map"]).unsqueeze(0).float().to(self.device)
             global_features = torch.from_numpy(observation["global_features"]).unsqueeze(0).float().to(self.device)
-            q_values = self.online_net(local_map, global_features)
+            if self.use_lstm:
+                q_values, self._hidden_state = self.online_net(local_map, global_features, self._hidden_state)
+            else:
+                q_values = self.online_net(local_map, global_features)
         valid_actions = env.get_valid_actions()
         q_values = self._mask_invalid_actions(q_values, valid_actions)
         return int(torch.argmax(q_values, dim=1).item())
@@ -219,6 +239,7 @@ class DoubleDQNAgent:
     def reset_episode_stats(self) -> None:
         for key in self.episode_action_stats:
             self.episode_action_stats[key] = 0
+        self._hidden_state = self.online_net.init_hidden(1, self.device)
 
     def get_episode_stats(self) -> dict[str, int]:
         return dict(self.episode_action_stats)
@@ -247,6 +268,9 @@ class DoubleDQNAgent:
         return len(self.replay_buffer) >= batch_size
 
     def train_step(self, batch_size: int) -> float:
+        if self.use_lstm:
+            return self._train_step_lstm(batch_size)
+
         n_step = self.config.n_step
         gamma = self.config.gamma
 
@@ -324,15 +348,79 @@ class DoubleDQNAgent:
 
         return self.last_loss
 
+    def _train_step_lstm(self, batch_size: int) -> float:
+        """LSTM 序列训练：采样连续序列，用 forward_sequence 计算 Q 值。"""
+        seq_data = self.replay_buffer.sample_sequences(batch_size, self.lstm_seq_len)
+        if seq_data is None:
+            return 0.0
+
+        gamma = self.config.gamma
+        last_indices = seq_data["last_indices"]
+
+        local_seq = torch.from_numpy(seq_data["local_map"]).float().to(self.device)
+        global_seq = torch.from_numpy(seq_data["global_features"]).float().to(self.device)
+        actions = torch.from_numpy(seq_data["action"]).long().to(self.device)
+        rewards = torch.from_numpy(seq_data["reward"]).float().to(self.device)
+        dones = torch.from_numpy(seq_data["done"]).float().to(self.device)
+        next_local_seq = torch.from_numpy(seq_data["next_local_map"]).float().to(self.device)
+        next_global_seq = torch.from_numpy(seq_data["next_global_features"]).float().to(self.device)
+        next_masks = torch.from_numpy(seq_data["next_valid_action_mask"]).float().to(self.device)
+
+        B, T = actions.shape
+
+        self.online_net.train()
+        online_q = self.online_net.forward_sequence(local_seq, global_seq)  # (B, T, A)
+        current_q = online_q.gather(2, actions.unsqueeze(2)).squeeze(2)  # (B, T)
+
+        with torch.no_grad():
+            # Double DQN: online 选动作, target 评估
+            next_q_online = self.online_net.forward_sequence(next_local_seq, next_global_seq)
+            next_q_online_masked = self._mask_invalid_actions(next_q_online, next_masks)
+            next_actions = torch.argmax(next_q_online_masked, dim=2, keepdim=True)
+
+            next_q_target = self.target_net.forward_sequence(next_local_seq, next_global_seq)
+            next_q_target_masked = self._mask_invalid_actions(next_q_target, next_masks)
+            next_q = next_q_target_masked.gather(2, next_actions).squeeze(2)  # (B, T)
+
+            td_target = rewards + gamma * next_q * (1.0 - dones)
+
+            bc_q = self.bc_net.forward_sequence(local_seq, global_seq)
+            bc_expert = torch.argmax(bc_q, dim=2)  # (B, T)
+
+        td_errors = (current_q - td_target).abs()
+        td_loss = self.loss_fn(current_q, td_target)
+        bc_reg_weight = self._current_bc_reg_weight()
+        ce_loss = nn.functional.cross_entropy(
+            online_q.view(B * T, self.action_dim),
+            bc_expert.view(B * T),
+        )
+        loss = td_loss + bc_reg_weight * ce_loss
+
+        self.optimizer.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.online_net.parameters(), self.config.max_gradient_norm)
+        self.optimizer.step()
+
+        # PER 更新：用平均 TD 误差更新序列末尾索引
+        mean_td = td_errors.mean(dim=1).detach().cpu().numpy()
+        self.replay_buffer.update_priorities(last_indices, mean_td, self.config.per_epsilon)
+
+        self.training_steps += 1
+        self.last_loss = float(td_loss.mean().item())
+        if self.training_steps % self.config.target_update_interval == 0:
+            self.target_net.load_state_dict(self.online_net.state_dict())
+
+        return self.last_loss
+
     def _mask_invalid_actions(
         self,
         q_values: torch.Tensor,
-        valid_actions: list[int] | np.ndarray,
+        valid_actions: list[int] | np.ndarray | torch.Tensor,
     ) -> torch.Tensor:
-        if isinstance(valid_actions, np.ndarray) and valid_actions.ndim == 2:
+        if isinstance(valid_actions, np.ndarray):
             mask = torch.from_numpy(valid_actions).to(q_values.device)
             return q_values.masked_fill(mask <= 0.0, float("-inf"))
-        if isinstance(valid_actions, torch.Tensor) and valid_actions.ndim == 2:
+        if isinstance(valid_actions, torch.Tensor):
             return q_values.masked_fill(valid_actions <= 0.0, float("-inf"))
 
         mask = torch.full((self.action_dim,), float("-inf"), device=q_values.device)
@@ -360,11 +448,19 @@ class DoubleDQNAgent:
 
     def load(self, path: str) -> None:
         checkpoint = torch.load(path, map_location=self.device, weights_only=True)
-        self.online_net.load_state_dict(checkpoint["online_state_dict"])
-        self.target_net.load_state_dict(checkpoint["target_state_dict"])
+        online_missing, online_unexpected = self.online_net.load_state_dict(checkpoint["online_state_dict"], strict=False)
+        self.target_net.load_state_dict(checkpoint["target_state_dict"], strict=False)
         if "optimizer_state_dict" in checkpoint:
-            self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+            try:
+                self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+            except Exception:
+                pass  # optimizer state shape可能不匹配（如LSTM参数新增），跳过
         self.training_steps = int(checkpoint.get("training_steps", 0))
         self.last_loss = float(checkpoint.get("last_loss", 0.0))
-        # 同步冻结 BC 网络
-        self.bc_net.load_state_dict(checkpoint["online_state_dict"])
+        self.bc_net.load_state_dict(checkpoint["online_state_dict"], strict=False)
+        if online_missing:
+            from warnings import warn
+            warn(f"加载 checkpoint 时缺少键（随机初始化）: {online_missing}")
+        if online_unexpected:
+            from warnings import warn
+            warn(f"加载 checkpoint 时多余键（已忽略）: {online_unexpected}")

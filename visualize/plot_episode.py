@@ -50,9 +50,10 @@ def plot_episode(
     scene_seed: int | None = None,
     scenario_mode: str = "random",
     use_waypoints: bool = False,
+    use_lstm: bool = False,
 ) -> None:
     t0 = time.perf_counter()
-    dqn_summary, env = _collect_dqn_path(checkpoint_name, scene_seed=scene_seed, scenario_mode=scenario_mode, use_waypoints=use_waypoints)
+    dqn_summary, env = _collect_dqn_path(checkpoint_name, scene_seed=scene_seed, scenario_mode=scenario_mode, use_waypoints=use_waypoints, use_lstm=use_lstm)
     print(f"[Plot] D3QN collection done in {time.perf_counter() - t0:.1f}s")
 
     title = _make_title("D3QN Episode", env, dqn_summary)
@@ -77,11 +78,12 @@ def plot_comparison(
     scene_seed: int | None = None,
     scenario_mode: str = "random",
     use_waypoints: bool = False,
+    use_lstm: bool = False,
 ) -> None:
     t0 = time.perf_counter()
 
     print("[Plot] Stage 1/3: collecting D3QN path...")
-    dqn_summary, env = _collect_dqn_path(checkpoint_name, scene_seed=scene_seed, scenario_mode=scenario_mode, use_waypoints=use_waypoints)
+    dqn_summary, env = _collect_dqn_path(checkpoint_name, scene_seed=scene_seed, scenario_mode=scenario_mode, use_waypoints=use_waypoints, use_lstm=use_lstm)
     print(f"[Plot] Stage 1/3 done in {time.perf_counter() - t0:.1f}s")
 
     print("[Plot] Stage 2/3: running J(p)=L+lambda*V A* planner...")
@@ -135,17 +137,20 @@ def _collect_dqn_path(
     scene_seed: int | None = None,
     scenario_mode: str = "random",
     use_waypoints: bool = False,
+    use_lstm: bool = False,
 ) -> tuple[dict[str, Any], BattlefieldEnv]:
     checkpoint_path = _find_checkpoint(checkpoint_name)
     print(f"[Plot] Loading checkpoint: {checkpoint_path}")
 
     env = _make_env(scenario_mode)
-    cfg = TrainingConfig(waypoint=WaypointConfig(enabled=True)) if use_waypoints else TrainingConfig()
+    wp_cfg = WaypointConfig(enabled=True) if use_waypoints else WaypointConfig()
+    cfg = TrainingConfig(waypoint=wp_cfg, use_lstm=use_lstm)
     agent = DoubleDQNAgent(action_dim=len(BattlefieldEnv.ACTIONS), config=cfg)
     agent.load(str(checkpoint_path))
-    print(f"[Plot] Checkpoint loaded, running episode (scenario={scenario_mode}, seed={scene_seed}, waypoints={use_waypoints})...")
+    print(f"[Plot] Checkpoint loaded, running episode (scenario={scenario_mode}, seed={scene_seed}, waypoints={use_waypoints}, lstm={use_lstm})...")
 
     env.reset(scene_seed=scene_seed, scenario_mode=scenario_mode)
+    agent.reset_episode_stats()
     path_cells = [tuple(env.agent_position.tolist())]
     success = False
     final_visibility = float(env.visibility_map[tuple(env.agent_position)])
@@ -378,6 +383,7 @@ if __name__ == "__main__":
     parser.add_argument("--comparison", action="store_true", help="Run comparison with J(p) A* planner")
     parser.add_argument("--save", type=str, default=None, help="Save path for the figure")
     parser.add_argument("--use-waypoints", action="store_true", help="Enable waypoint mode for visualization")
+    parser.add_argument("--use-lstm", action="store_true", help="Enable LSTM mode for visualization")
     args = parser.parse_args()
 
     if args.comparison:
@@ -387,6 +393,7 @@ if __name__ == "__main__":
             scenario_mode=args.mode,
             save_path=args.save,
             use_waypoints=args.use_waypoints,
+            use_lstm=args.use_lstm,
         )
     else:
         plot_episode(
@@ -395,4 +402,5 @@ if __name__ == "__main__":
             scenario_mode=args.mode,
             save_path=args.save,
             use_waypoints=args.use_waypoints,
+            use_lstm=args.use_lstm,
         )

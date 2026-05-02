@@ -111,6 +111,10 @@ class ModelConfig:
     local_channels: int = 5
     # 全局特征向量的维度。
     global_feature_dim: int = 8
+    # 是否使用 LSTM 记忆模块。
+    use_lstm: bool = False
+    # LSTM 隐层大小。
+    lstm_hidden_size: int = 128
 
 
 @dataclass(frozen=True)
@@ -208,6 +212,17 @@ class TrainingDefaults:
     seed: int = 42
     # 探索相关配置集合。
     exploration: ExplorationConfig = field(default_factory=ExplorationConfig)
+    # 是否启用 LSTM 记忆模块。
+    use_lstm: bool = False
+    # LSTM 记忆模块配置。
+    lstm_hidden_size: int = 128
+    lstm_num_layers: int = 1
+    lstm_sequence_length: int = 10  # DRQN 训练时采样的序列长度
+    # 反向课程学习配置。
+    curriculum_enabled: bool = False
+    curriculum_success_threshold: float = 0.7
+    curriculum_window: int = 50
+    curriculum_patience: int = 5  # 连续成功 N 次后进阶
     # 是否启用 early stop。
     early_stop_enabled: bool = True
     # early stop 评估时使用的 episode 数。
