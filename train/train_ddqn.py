@@ -16,57 +16,6 @@ from train.dqn_agent import DoubleDQNAgent, TrainingConfig
 LAMBDA_CANDIDATES = [0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 16.0]
 
 
-class CurriculumScheduler:
-    """反向课程学习：从目标附近起始，逐步扩大起始距离。
-
-    Level 0: radius=5 → 逐步扩张到全图。
-    连续 N 次成功后进阶到下一级。
-    """
-
-    def __init__(self, config: TrainingConfig) -> None:
-        self.config = config
-        self.current_level = 0
-        self.consecutive_successes = 0
-
-    def get_start_radius(self) -> int:
-        step = 5
-        return min(5 + self.current_level * step, 50)
-
-    def sample_start_position(self, env: BattlefieldEnv, goal_pos: tuple[int, int]) -> tuple[int, int]:
-        radius = self.get_start_radius()
-        gx, gy = goal_pos
-        candidates: list[tuple[int, int]] = []
-        for dx in range(-radius, radius + 1):
-            for dy in range(-radius, radius + 1):
-                if abs(dx) + abs(dy) > radius:
-                    continue
-                x, y = gx + dx, gy + dy
-                if 0 <= x < env.grid_size and 0 <= y < env.grid_size:
-                    if env._cell_passable(x, y) and (x, y) != goal_pos:
-                        candidates.append((x, y))
-        if candidates:
-            return random.choice(candidates)
-        return (int(env.agent_position[0]), int(env.agent_position[1]))
-
-    def update(self, success: bool) -> None:
-        self.consecutive_successes = self.consecutive_successes + 1 if success else 0
-        if self.consecutive_successes >= self.config.curriculum_patience:
-            self.current_level += 1
-            self.consecutive_successes = 0
-
-    def log_status(self) -> str:
-        return f"curriculum(level={self.current_level} radius={self.get_start_radius()} consec={self.consecutive_successes})"
-
-
-def _apply_curriculum_start(env: BattlefieldEnv, curriculum: CurriculumScheduler) -> tuple[int, int]:
-    """将 agent 起始位置设置到课程半径内，返回新位置。"""
-    goal_pos = tuple(env.goal_position.tolist())
-    start_pos = curriculum.sample_start_position(env, goal_pos)
-    env.agent_position = np.array(start_pos, dtype=np.int32)
-    env.start_position = env.agent_position.copy()
-    return start_pos
-
-
 def train(config: TrainingConfig | None = None, bc_pretrain_path: str = "artifacts/ddqn_bc.pt", multi_lambda: bool = False) -> None:
     config = config or TrainingConfig()
     env = BattlefieldEnv()
@@ -97,15 +46,8 @@ def train(config: TrainingConfig | None = None, bc_pretrain_path: str = "artifac
     log(f"训练设备: {agent.device}")
     log(f"训练日志: {log_path}")
     use_waypoints = config.waypoint.enabled
-    use_lstm = config.use_lstm
     if use_waypoints:
         log(f"航点模式: interval={config.waypoint.interval} max_segment_multiplier={config.waypoint.max_segment_multiplier}")
-    if use_lstm:
-        log(f"LSTM: hidden_size={config.lstm_hidden_size} seq_len={config.lstm_sequence_length}")
-    if config.curriculum_enabled:
-        log(f"反向课程: patience={config.curriculum_patience} threshold={config.curriculum_success_threshold}")
-
-    curriculum = CurriculumScheduler(config) if config.curriculum_enabled else None
 
     global_step = 0
     best_eval_reward = float("-inf")
@@ -123,10 +65,6 @@ def train(config: TrainingConfig | None = None, bc_pretrain_path: str = "artifac
             episode_reward = 0.0
             episode_loss: list[float] = []
             success = False
-
-            if curriculum is not None:
-                start_pos = _apply_curriculum_start(env, curriculum)
-                observation = env.get_observation()
 
             if use_waypoints:
                 # 航点模式：先生成 A* 路径并采样航点
@@ -168,15 +106,14 @@ def train(config: TrainingConfig | None = None, bc_pretrain_path: str = "artifac
                     global_step += 1
 
                     if global_step >= config.warmup_steps and global_step % config.train_frequency == 0 and agent.can_train(config.batch_size):
-                        episode_loss.append(agent.train_step(config.batch_size))
+                        loss = agent.train_step(config.batch_size)
+                        if loss > 0:
+                            episode_loss.append(loss)
 
                 # HER: 失败 episode 用已访问位置重新标记奖励（航点模式关闭）
                 if not success:
                     _relabel_her(agent, env, episode_positions, episode_transitions,
                                  k=config.her_relabel_count, log_fn=log)
-
-            if curriculum is not None:
-                curriculum.update(success)
 
             recent_rewards.append(episode_reward)
             if len(recent_rewards) > 20:
@@ -185,12 +122,11 @@ def train(config: TrainingConfig | None = None, bc_pretrain_path: str = "artifac
             mean_reward = statistics.mean(recent_rewards)
             mean_loss = statistics.mean(episode_loss) if episode_loss else 0.0
             action_stats = agent.get_episode_stats()
-            curriculum_tag = f" | {curriculum.log_status()}" if curriculum is not None else ""
             log(
                 f"Episode {episode:04d} | reward={episode_reward:7.3f} | mean20={mean_reward:7.3f} | "
                 f"loss={mean_loss:6.4f} | epsilon={agent.current_epsilon(global_step):5.3f} | "
                 f"path_len={env.total_path_length:6.3f} | hidden_ratio={env.hidden_ratio:5.3f} | "
-                f"scene_seed={train_scene_seed} | success={success}{curriculum_tag} | "
+                f"scene_seed={train_scene_seed} | success={success} | "
                 f"greedy={action_stats['greedy']:03d} heuristic={action_stats['heuristic']:03d} "
                 f"teacher={action_stats['teacher']:03d} random={action_stats['random']:03d}"
             )
@@ -308,7 +244,7 @@ def _run_waypoint_episode(
     config: TrainingConfig,
     global_step: int,
     log_fn: Callable[[str], None],
-) -> tuple[float, list[float], bool, bool]:
+) -> tuple[float, list[float], bool, bool, int]:
     """运行一个航点式 episode：逐段导航到每个航点。
 
     Returns:
@@ -589,8 +525,6 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Train D3QN agent")
     parser.add_argument("--use-waypoints", action="store_true", help="Enable waypoint-based hierarchical RL")
-    parser.add_argument("--use-lstm", action="store_true", help="Enable LSTM memory module (DRQN)")
-    parser.add_argument("--curriculum", action="store_true", help="Enable reverse curriculum learning")
     parser.add_argument("--bc-path", default="artifacts/ddqn_bc.pt", help="BC pretrain checkpoint path")
     parser.add_argument("--episodes", type=int, default=None, help="Override training episodes")
     parser.add_argument("--multi-lambda", action="store_true", help="Evaluate with multiple λ values for waypoint generation")
@@ -603,23 +537,10 @@ if __name__ == "__main__":
         cfg = TrainingConfig(
             waypoint=WaypointConfig(enabled=True),
         )
-    if args.use_lstm:
-        cfg = TrainingConfig(
-            use_lstm=True,
-            waypoint=cfg.waypoint,
-        )
-    if args.curriculum:
-        cfg = TrainingConfig(
-            curriculum_enabled=True,
-            waypoint=cfg.waypoint,
-            use_lstm=cfg.use_lstm,
-        )
     if args.episodes is not None:
         cfg = TrainingConfig(
             episodes=args.episodes,
             waypoint=cfg.waypoint,
-            use_lstm=cfg.use_lstm,
-            curriculum_enabled=cfg.curriculum_enabled,
         )
 
     if args.eval_only:

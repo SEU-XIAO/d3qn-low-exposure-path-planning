@@ -33,10 +33,6 @@ class EnvConfig:
     enemy_switch_interval: int = 50
 
     # ---- 敌人与可见性 ----
-    # 敌人水平视场角（单位：度）。
-    enemy_horizontal_fov_deg: float = 70.0
-    # 敌人最大可见距离（单位：格）。
-    enemy_max_range: float = 38.0
     # 敌人到目标点的最小距离约束（避免目标过近）。
     enemy_goal_min_distance: float = 16.0
     # 敌人到起点的最小距离约束（避免开局贴脸）。
@@ -107,14 +103,10 @@ class EnvConfig:
 
 @dataclass(frozen=True)
 class ModelConfig:
-    # 局部/全局输入中的局部通道数（occupancy/visibility/goal/agent/enemy）。
-    local_channels: int = 5
+    # 局部/全局输入中的局部通道数（passable/occupancy/visibility/goal/agent/enemy/waypoint）。
+    local_channels: int = 7
     # 全局特征向量的维度。
-    global_feature_dim: int = 8
-    # 是否使用 LSTM 记忆模块。
-    use_lstm: bool = False
-    # LSTM 隐层大小。
-    lstm_hidden_size: int = 128
+    global_feature_dim: int = 12
 
 
 @dataclass(frozen=True)
@@ -148,8 +140,6 @@ class WaypointConfig:
     max_segment_multiplier: float = 3.0
     # 航点生成时 Visibility-A* 的可见性权重（0=最短路径，>0=避开展露区）。
     waypoint_visible_weight: float = 6.0
-    # 到达中间航点的奖励。
-    waypoint_reached_reward: float = 10.0
     # 段超时的惩罚。
     segment_timeout_penalty: float = 20.0
 
@@ -212,12 +202,6 @@ class TrainingDefaults:
     seed: int = 42
     # 探索相关配置集合。
     exploration: ExplorationConfig = field(default_factory=ExplorationConfig)
-    # 是否启用 LSTM 记忆模块。
-    use_lstm: bool = False
-    # LSTM 记忆模块配置。
-    lstm_hidden_size: int = 128
-    lstm_num_layers: int = 1
-    lstm_sequence_length: int = 10  # DRQN 训练时采样的序列长度
     # 反向课程学习配置。
     curriculum_enabled: bool = False
     curriculum_success_threshold: float = 0.7

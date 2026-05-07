@@ -250,7 +250,7 @@ def main() -> None:
     dataset = generate_expert_data(args.episodes, augment_samples=args.augment,
                                    use_waypoints=args.use_waypoints)
 
-    model_config = ModelConfig(local_channels=6, global_feature_dim=12) if args.use_waypoints else None
+    model_config = ModelConfig(local_channels=7, global_feature_dim=12)
     net = train_bc(dataset, epochs=args.epochs, lr=args.lr,
                    batch_size=args.batch_size, device=args.device,
                    model_config=model_config)

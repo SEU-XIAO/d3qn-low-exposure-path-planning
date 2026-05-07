@@ -10,7 +10,7 @@ class ReplayBuffer:
     """
 
     def __init__(self, capacity: int, action_dim: int,
-                 local_map_channels: int = 5, global_feature_dim: int = 8) -> None:
+                 local_map_channels: int = 7, global_feature_dim: int = 12) -> None:
         self.capacity = capacity
         self.action_dim = action_dim
         self._local_map_size = (local_map_channels, 50, 50)
@@ -68,21 +68,6 @@ class ReplayBuffer:
         if self._size < self.capacity:
             self._size += 1
 
-    def sample(self, batch_size: int) -> dict[str, np.ndarray]:
-        """均匀采样，返回字典。"""
-        indices = np.random.randint(0, self._size, size=batch_size)
-        payload: dict[str, np.ndarray] = {
-            "local_map": self.local_maps[indices].astype(np.float32) / 255.0,
-            "global_features": self.global_features[indices].astype(np.float32),
-            "action": self.actions[indices].astype(np.int64),
-            "reward": self.rewards[indices].astype(np.float32),
-            "next_local_map": self.next_local_maps[indices].astype(np.float32) / 255.0,
-            "next_global_features": self.next_global_features[indices].astype(np.float32),
-            "next_valid_action_mask": self.next_valid_masks[indices].astype(np.float32),
-            "done": self.dones[indices].astype(np.float32),
-        }
-        return payload
-
     def sample_per(self, batch_size: int, alpha: float, beta: float) -> tuple[np.ndarray, np.ndarray]:
         """优先级采样，返回 (indices, is_weights)。"""
         if self._size == 0:
@@ -108,53 +93,6 @@ class ReplayBuffer:
         for i, idx in enumerate(indices):
             self.priorities[idx] = float(new_priorities[i])
         self._max_priority = max(self._max_priority, float(new_priorities.max()))
-
-    def sample_n_step_indices(self, batch_size: int) -> np.ndarray:
-        """采样不含 episode 边界的起始索引（供 n-step TD 使用）。"""
-        if self._size < batch_size * 2:
-            return np.random.randint(0, max(1, self._size), size=batch_size)
-
-        valid: list[int] = []
-        attempts = 0
-        while len(valid) < batch_size and attempts < batch_size * 20:
-            attempts += 1
-            i = int(np.random.randint(0, self._size))
-            ok = True
-            for k in range(1, 6):  # check up to 5 steps ahead
-                j = (i + k) % self.capacity
-                if j >= self._size:
-                    break
-                if self.episode_starts[j]:
-                    ok = False
-                    break
-            if ok:
-                valid.append(i)
-        if len(valid) < batch_size:
-            valid.extend([int(np.random.randint(0, self._size)) for _ in range(batch_size - len(valid))])
-        return np.array(valid[:batch_size], dtype=np.int64)
-
-    def get_n_step_returns(
-        self,
-        indices: np.ndarray,
-        n_step: int,
-        gamma: float,
-    ) -> np.ndarray:
-        """计算 n-step 折现回报 R_i^n + gamma^n * 0（bootstrapping 部分由调用方加）。"""
-        n_step_returns = np.zeros(len(indices), dtype=np.float32)
-        for b, idx in enumerate(indices):
-            ret = 0.0
-            actual_n = 0
-            for k in range(n_step):
-                i = (idx + k) % self.capacity
-                if i >= self._size:
-                    break
-                ret += (gamma ** k) * float(self.rewards[i])
-                actual_n = k + 1
-                if self.dones[i]:
-                    break
-            n_step_returns[b] = float(ret)
-            n_step_returns[b] = (actual_n, float(ret))  # hack: need to return actual_n too
-        return n_step_returns
 
     def get_n_step_data(
         self,
@@ -186,8 +124,8 @@ class ReplayBuffer:
 
             n_returns[b] = float(ret)
 
-            # 若未在窗口内 done，取第 n 步的 next state 用于 bootstrapping
-            n_idx = (idx + n_step) % self.capacity
+            # 若未在窗口内 done，取第 n-1 步的 next state 用于 bootstrapping（= s_{idx+n_step}）
+            n_idx = (idx + n_step - 1) % self.capacity
             last_idx = (idx + final_k) % self.capacity
             if not self.dones[last_idx] and n_idx < self._size and not self._is_cross_episode(idx, n_step):
                 nth_local[b] = self.next_local_maps[n_idx]
@@ -196,62 +134,6 @@ class ReplayBuffer:
                 nth_mask[b] = self.next_valid_masks[n_idx]
 
         return n_returns, nth_local, nth_global, nth_done, nth_mask
-
-    def sample_sequences(self, batch_size: int, seq_len: int
-                         ) -> dict[str, np.ndarray] | None:
-        """采样连续序列供 DRQN 训练。
-
-        返回形状为 (batch, seq_len, ...) 的字典，或 None（缓冲区不足时）。
-        每个序列不跨越 episode 边界。
-        """
-        if self._size < seq_len or batch_size == 0:
-            return None
-
-        # 找可用的序列起始索引（不跨越 episode 边界，且序列完全在缓冲区内）
-        valid_starts: list[int] = []
-        for i in range(self._size - seq_len + 1):
-            ok = True
-            for k in range(1, seq_len):
-                if self.episode_starts[(i + k) % self.capacity]:
-                    ok = False
-                    break
-            if ok:
-                valid_starts.append(i)
-
-        if len(valid_starts) < batch_size:
-            return None
-
-        starts = np.random.choice(valid_starts, size=batch_size, replace=False)
-
-        # 构建序列: (batch, seq_len, ...)
-        seq_indices = np.array([np.arange(s, s + seq_len) for s in starts], dtype=np.int64)
-
-        local_seq = self.local_maps[seq_indices].astype(np.float32) / 255.0
-        global_seq = self.global_features[seq_indices].astype(np.float32)
-        action_seq = self.actions[seq_indices].astype(np.int64)
-        reward_seq = self.rewards[seq_indices].astype(np.float32)
-        done_seq = self.dones[seq_indices].astype(np.float32)
-
-        # next_* 序列：每个位置指向下一步
-        next_indices = np.clip(seq_indices + 1, 0, self.capacity - 1)
-        next_local_seq = self.next_local_maps[next_indices].astype(np.float32) / 255.0
-        next_global_seq = self.next_global_features[next_indices].astype(np.float32)
-        mask_seq = self.next_valid_masks[next_indices].astype(np.float32)
-
-        # 每个序列最后一步的索引（用于 n-step TD target 计算）
-        last_indices = seq_indices[:, -1]
-
-        return {
-            "local_map": local_seq,
-            "global_features": global_seq,
-            "action": action_seq,
-            "reward": reward_seq,
-            "done": done_seq,
-            "next_local_map": next_local_seq,
-            "next_global_features": next_global_seq,
-            "next_valid_action_mask": mask_seq,
-            "last_indices": last_indices,
-        }
 
     def _is_cross_episode(self, start_idx: int, n_step: int) -> bool:
         """检查从 start_idx 开始的 n_step 窗口是否跨越 episode 边界。"""

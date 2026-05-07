@@ -316,35 +316,6 @@ class BattlefieldEnv:
 
         return tuple(self.config.start), tuple(self.config.goal)
 
-    def _pick_enemy_in_window(self, rng: np.random.Generator) -> tuple[int, int] | None:
-        """从预计算池中选一个落在当前窗口内的敌人位置（窗口坐标）。"""
-        ox, oy = self.window_offset
-        candidates: list[tuple[int, int]] = []
-        for gx, gy in self.enemy_pool:
-            wx = gx - ox
-            wy = gy - oy
-            if 0 <= wx < self.grid_size and 0 <= wy < self.grid_size:
-                # 检查敌人所在格是否可通行（tag=0）
-                if self.window_tag_map is not None and self.window_tag_map[wx, wy] == 0:
-                    candidates.append((wx, wy))
-        if not candidates:
-            return None
-        return candidates[int(rng.integers(0, len(candidates)))]
-
-    def _fallback_enemy_in_window(self, rng: np.random.Generator) -> tuple[int, int]:
-        """池中无可用敌人时，在窗口北侧选一个高点。"""
-        fallback: list[tuple[int, int]] = []
-        for x in range(self.config.enemy_region_width):
-            for y in range(self.grid_size):
-                if self.window_tag_map is not None and self.window_tag_map[x, y] == 0:
-                    fallback.append((x, y))
-        if not fallback:
-            return (min(self.config.enemy_region_width - 1, self.grid_size - 1), self.grid_size // 2)
-        # 按高度排序，取 top 10%
-        fallback.sort(key=lambda c: self.height_map[c], reverse=True)
-        top_n = max(1, len(fallback) // 10)
-        return fallback[int(rng.integers(0, top_n))]
-
     def _has_feasible_path_window(self) -> bool:
         """窗口内的 BFS 可达性检查，仅走 tag=0 且满足爬坡约束的格子。"""
         start = tuple(self.start_position.tolist())
@@ -364,15 +335,6 @@ class BattlefieldEnv:
                 visited.add(neighbor)
                 queue.append(neighbor)
         return False
-
-    def _update_enemy_height_from_full(self) -> None:
-        """全图模式下从 full_terrain 读取敌人所在格的高度。"""
-        ex, ey = int(self.enemy_position[0]), int(self.enemy_position[1])
-        ox, oy = self.window_offset
-        if self.full_terrain is not None:
-            self.enemy_position[2] = float(self.full_terrain.height_map[oy + ex, ox + ey])
-        else:
-            self.enemy_position[2] = self._cell_height((ex, ey))
 
     def _compute_visibility_area_score_window(self, enemy_xy: tuple[int, int]) -> float:
         """窗口内以 enemy_xy 为观察者的可见格子总数。"""
@@ -526,19 +488,6 @@ class BattlefieldEnv:
             if float(ft.height_map[cell]) + bias >= pz:
                 return True
         return False
-
-    def _global_cell_height(self, cell: tuple[int, int]) -> float:
-        """读取格子高度。全图模式下从 full_terrain 读取以支持窗口外遮挡判定。
-        坐标惯例：(x, y) 对应 height_map[x, y]，其中 x=行, y=列。"""
-        x, y = cell
-        if self.full_terrain is not None:
-            ox, oy = self.window_offset  # ox=列偏移, oy=行偏移
-            global_row = x + oy
-            global_col = y + ox
-            if 0 <= global_row < self.full_terrain.full_height and 0 <= global_col < self.full_terrain.full_width:
-                return float(self.full_terrain.height_map[global_row, global_col])
-            return 0.0
-        return float(self.height_map[x, y])
 
     def _cell_height(self, cell: tuple[int, int]) -> float:
         """读取格子高度（窗口视图）。"""
@@ -741,11 +690,15 @@ class BattlefieldEnv:
         enemy_win_x = int(self.enemy_position[0])
         enemy_win_y = int(self.enemy_position[1])
         if self.current_scenario_mode == "full_map" and self.full_terrain is not None:
-            ox, oy = self.window_offset
-            enemy_win_x = enemy_win_x - ox
-            enemy_win_y = enemy_win_y - oy
+            ox, oy = self.window_offset  # ox=col offset, oy=row offset
+            enemy_win_x = enemy_win_x - oy  # global_row - row_offset → window_row
+            enemy_win_y = enemy_win_y - ox  # global_col - col_offset → window_col
         enemy_win_x = max(0, min(grid - 1, enemy_win_x))
         enemy_win_y = max(0, min(grid - 1, enemy_win_y))
+
+        passable = np.ones((grid, grid), dtype=np.float32)
+        if self.window_tag_map is not None:
+            passable = (self.window_tag_map == 0).astype(np.float32)
 
         if size >= grid:
             occ = self.occupancy_map.astype(np.float32)
@@ -759,9 +712,10 @@ class BattlefieldEnv:
             waypoint_ch = np.zeros_like(occ, dtype=np.float32)
             if self.current_subgoal is not None:
                 waypoint_ch[tuple(self.current_subgoal)] = 1.0
-            return np.stack((occ, vis, goal, agent, enemy_ch, waypoint_ch), axis=0).astype(np.float32)
+            return np.stack((passable, occ, vis, goal, agent, enemy_ch, waypoint_ch), axis=0).astype(np.float32)
 
         radius = size // 2
+        padded_passable = np.pad(passable, radius, mode="constant", constant_values=0.0)
         padded_occ = np.pad(self.occupancy_map, radius, mode="constant", constant_values=1.0)
         padded_visibility = np.pad(self.visibility_map, radius, mode="constant")
         padded_goal = np.pad(np.zeros_like(self.occupancy_map, dtype=np.float32), radius, mode="constant")
@@ -791,7 +745,7 @@ class BattlefieldEnv:
         xs = slice(ax - radius, ax + radius + 1)
         ys = slice(ay - radius, ay + radius + 1)
         return np.stack(
-            (padded_occ[xs, ys], padded_visibility[xs, ys], padded_goal[xs, ys],
+            (padded_passable[xs, ys], padded_occ[xs, ys], padded_visibility[xs, ys], padded_goal[xs, ys],
              padded_agent[xs, ys], padded_enemy[xs, ys], padded_waypoint[xs, ys]),
             axis=0,
         ).astype(np.float32)

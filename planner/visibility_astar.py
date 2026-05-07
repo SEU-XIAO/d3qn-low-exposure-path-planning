@@ -121,6 +121,8 @@ class VisibilityAwareAStarPlanner:
         x, y = cell
         if x < 0 or y < 0 or x >= self.env.grid_size or y >= self.env.grid_size:
             return True
+        if not self.env._cell_passable(x, y):
+            return True
         if x == int(self.env.enemy_position[0]) and y == int(self.env.enemy_position[1]):
             return True
         return not self.env.can_move_between(current, cell)

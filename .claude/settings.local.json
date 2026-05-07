@@ -38,7 +38,10 @@
       "Bash(python -m visualize.plot_episode --seed 42 --mode fixed --comparison)",
       "Bash(python -m visualize.plot_scene)",
       "Bash(timeout 30 python -m visualize.plot_episode --seed 42 --mode fixed)",
-      "Bash(python -m visualize.plot_episode --seed 42 --mode fixed)"
+      "Bash(python -m visualize.plot_episode --seed 42 --mode fixed)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('train/dqn_agent.py', encoding='utf-8'\\).read\\(\\)\\); print\\('dqn_agent.py: OK'\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('train/train_ddqn.py', encoding='utf-8'\\).read\\(\\)\\); print\\('train_ddqn.py: OK'\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('train/replay_buffer.py', encoding='utf-8'\\).read\\(\\)\\); print\\('replay_buffer.py: OK'\\)\")"
     ]
   }
 }

@@ -12,8 +12,8 @@ from env.battlefield_env import BattlefieldEnv
 def _compute_fov_masks(env: BattlefieldEnv) -> tuple[np.ndarray, np.ndarray]:
     visible_mask = env.visibility_map > 0.5
     occluded_mask = ~visible_mask
-    ex = int(env.enemy_position[0]) - env.window_offset[0]
-    ey = int(env.enemy_position[1]) - env.window_offset[1]
+    ex = int(env.enemy_position[0]) - env.window_offset[1]  # row - row_offset
+    ey = int(env.enemy_position[1]) - env.window_offset[0]  # col - col_offset
     if 0 <= ex < env.grid_size and 0 <= ey < env.grid_size:
         occluded_mask[ex, ey] = False
     return visible_mask, occluded_mask
@@ -81,8 +81,8 @@ def draw_3d_scene(ax: plt.Axes, env: BattlefieldEnv) -> None:
     start = env.agent_position.astype(np.float32)
     goal = env.goal_position.astype(np.float32)
     enemy_global = env.enemy_position.astype(np.float32)
-    ex = enemy_global[0] - float(env.window_offset[0])
-    ey = enemy_global[1] - float(env.window_offset[1])
+    ex = enemy_global[0] - float(env.window_offset[1])  # row - row_offset
+    ey = enemy_global[1] - float(env.window_offset[0])  # col - col_offset
     ez = enemy_global[2]
     start_h = float(env.height_map[int(start[0]), int(start[1])])
     goal_h = float(env.height_map[int(goal[0]), int(goal[1])])
@@ -165,8 +165,8 @@ def _plot_topdown_scene(ax: plt.Axes, env: BattlefieldEnv, title: str) -> None:
 
     start = env.start_position
     goal = env.goal_position
-    ex = int(env.enemy_position[0]) - env.window_offset[0]
-    ey = int(env.enemy_position[1]) - env.window_offset[1]
+    ex = int(env.enemy_position[0]) - env.window_offset[1]  # row - row_offset
+    ey = int(env.enemy_position[1]) - env.window_offset[0]  # col - col_offset
 
     ax.scatter(start[0], start[1], color="green", s=110, label="Start", zorder=5)
     ax.scatter(goal[0], goal[1], color="blue", s=110, label="Goal", zorder=5)

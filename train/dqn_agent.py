@@ -43,9 +43,6 @@ class TrainingConfig:
     waypoint: WaypointConfig = field(default_factory=lambda: TrainingDefaults().waypoint)
     seed: int = TrainingDefaults().seed
     exploration: ExplorationConfig = field(default_factory=lambda: TrainingDefaults().exploration)
-    use_lstm: bool = TrainingDefaults().use_lstm
-    lstm_hidden_size: int = TrainingDefaults().lstm_hidden_size
-    lstm_sequence_length: int = TrainingDefaults().lstm_sequence_length
     curriculum_enabled: bool = TrainingDefaults().curriculum_enabled
     curriculum_success_threshold: float = TrainingDefaults().curriculum_success_threshold
     curriculum_window: int = TrainingDefaults().curriculum_window
@@ -67,16 +64,9 @@ class DoubleDQNAgent:
         self.action_dim = action_dim
         self.exploration = self.config.exploration
 
-        wp = self.config.waypoint
-        lc = 6 if wp.enabled else 5
-        gd = 12 if wp.enabled else 8
         model_config = ModelConfig(
-            local_channels=lc, global_feature_dim=gd,
-            use_lstm=self.config.use_lstm,
+            local_channels=7, global_feature_dim=12,
         )
-
-        self.use_lstm = self.config.use_lstm
-        self.lstm_seq_len = self.config.lstm_sequence_length
 
         self.online_net = HybridPolicyNetwork(action_dim=self.action_dim, config=model_config).to(self.device)
         self.target_net = HybridPolicyNetwork(action_dim=self.action_dim, config=model_config).to(self.device)
@@ -93,7 +83,7 @@ class DoubleDQNAgent:
         self.loss_fn = nn.SmoothL1Loss()
         self.replay_buffer = ReplayBuffer(
             self.config.replay_capacity, self.action_dim,
-            local_map_channels=lc, global_feature_dim=gd,
+            local_map_channels=7, global_feature_dim=12,
         )
         self.training_steps = 0
         self.last_loss = 0.0
@@ -103,7 +93,6 @@ class DoubleDQNAgent:
             "teacher": 0,
             "random": 0,
         }
-        self._hidden_state: tuple[torch.Tensor, torch.Tensor] | None = None
 
         random.seed(self.config.seed)
         np.random.seed(self.config.seed)
@@ -114,10 +103,9 @@ class DoubleDQNAgent:
         with torch.no_grad():
             local_map = torch.from_numpy(observation["local_map"]).unsqueeze(0).float().to(self.device)
             global_features = torch.from_numpy(observation["global_features"]).unsqueeze(0).float().to(self.device)
-            if self.use_lstm:
-                q_values, self._hidden_state = self.online_net(local_map, global_features, self._hidden_state)
-            else:
-                q_values = self.online_net(local_map, global_features)
+            q_values = self.online_net(local_map, global_features)
+
+        valid_actions = env.get_valid_actions() if env is not None else None
 
         if random.random() < epsilon:
             guided_action, source = self._select_guided_exploration_action(env, global_step)
@@ -125,11 +113,13 @@ class DoubleDQNAgent:
                 self.episode_action_stats[source] += 1
                 return guided_action
             self.episode_action_stats["random"] += 1
+            if valid_actions:
+                return random.choice(valid_actions)
             return random.randrange(self.action_dim)
 
-        if env is not None:
-            valid_actions = env.get_valid_actions()
-            q_values = self._mask_invalid_actions(q_values, valid_actions)
+        if not valid_actions:
+            return random.randrange(self.action_dim)
+        q_values = self._mask_invalid_actions(q_values, valid_actions)
         self.episode_action_stats["greedy"] += 1
         return int(torch.argmax(q_values, dim=1).item())
 
@@ -138,11 +128,10 @@ class DoubleDQNAgent:
         with torch.no_grad():
             local_map = torch.from_numpy(observation["local_map"]).unsqueeze(0).float().to(self.device)
             global_features = torch.from_numpy(observation["global_features"]).unsqueeze(0).float().to(self.device)
-            if self.use_lstm:
-                q_values, self._hidden_state = self.online_net(local_map, global_features, self._hidden_state)
-            else:
-                q_values = self.online_net(local_map, global_features)
+            q_values = self.online_net(local_map, global_features)
         valid_actions = env.get_valid_actions()
+        if not valid_actions:
+            return random.randrange(self.action_dim)
         q_values = self._mask_invalid_actions(q_values, valid_actions)
         return int(torch.argmax(q_values, dim=1).item())
 
@@ -240,7 +229,6 @@ class DoubleDQNAgent:
     def reset_episode_stats(self) -> None:
         for key in self.episode_action_stats:
             self.episode_action_stats[key] = 0
-        self._hidden_state = self.online_net.init_hidden(1, self.device)
 
     def get_episode_stats(self) -> dict[str, int]:
         return dict(self.episode_action_stats)
@@ -269,9 +257,6 @@ class DoubleDQNAgent:
         return len(self.replay_buffer) >= batch_size
 
     def train_step(self, batch_size: int) -> float:
-        if self.use_lstm:
-            return self._train_step_lstm(batch_size)
-
         n_step = self.config.n_step
         gamma = self.config.gamma
 
@@ -279,7 +264,7 @@ class DoubleDQNAgent:
         indices, is_weights = self.replay_buffer.sample_per(batch_size, self.config.per_alpha, per_beta)
         if len(indices) == 0:
             return 0.0
-        n_step_returns, nth_local, nth_global, nth_done, nth_mask = \
+        (n_step_returns, nth_local, nth_global, nth_done, nth_mask) = \
             self.replay_buffer.get_n_step_data(indices, n_step, gamma)
 
         # 加载当前状态和动作
@@ -312,18 +297,27 @@ class DoubleDQNAgent:
                 nth_global_valid = nth_global_t[bootstrap_mask]
                 nth_mask_valid = nth_mask_t[bootstrap_mask]
 
-                nth_online_q = self.online_net(nth_local_valid, nth_global_valid)
-                nth_online_q = self._mask_invalid_actions(nth_online_q, nth_mask_valid)
-                nth_actions = torch.argmax(nth_online_q, dim=1, keepdim=True)
+                valid_mask = nth_mask_valid.sum(dim=-1) > 0.0
+                if valid_mask.any():
+                    nth_local_valid = nth_local_valid[valid_mask]
+                    nth_global_valid = nth_global_valid[valid_mask]
+                    nth_mask_valid = nth_mask_valid[valid_mask]
 
-                nth_target_q_full = self.target_net(nth_local_valid, nth_global_valid)
-                nth_target_q_full = self._mask_invalid_actions(nth_target_q_full, nth_mask_valid)
-                nth_target_q = nth_target_q_full.gather(1, nth_actions).squeeze(1)
+                    nth_online_q = self.online_net(nth_local_valid, nth_global_valid)
+                    nth_online_q = self._mask_invalid_actions(nth_online_q, nth_mask_valid)
+                    nth_actions = torch.argmax(nth_online_q, dim=1, keepdim=True)
 
-                td_target[bootstrap_mask] += (gamma ** n_step) * nth_target_q
+                    nth_target_q_full = self.target_net(nth_local_valid, nth_global_valid)
+                    nth_target_q_full = self._mask_invalid_actions(nth_target_q_full, nth_mask_valid)
+                    nth_target_q = nth_target_q_full.gather(1, nth_actions).squeeze(1)
+
+                    td_target[bootstrap_mask.nonzero(as_tuple=True)[0][valid_mask]] += (gamma ** n_step) * nth_target_q
 
             bc_q = self.bc_net(local_map, global_features)
             bc_expert = torch.argmax(bc_q, dim=1)
+
+        if not torch.isfinite(current_q).all() or not torch.isfinite(td_target).all():
+            return 0.0
 
         # TD 误差（用于 PER 优先级更新）
         td_errors = (current_q - td_target).abs().detach().cpu().numpy()
@@ -341,70 +335,6 @@ class DoubleDQNAgent:
         self.optimizer.step()
 
         self.replay_buffer.update_priorities(indices, td_errors, self.config.per_epsilon)
-
-        self.training_steps += 1
-        self.last_loss = float(td_loss.mean().item())
-        if self.training_steps % self.config.target_update_interval == 0:
-            self.target_net.load_state_dict(self.online_net.state_dict())
-
-        return self.last_loss
-
-    def _train_step_lstm(self, batch_size: int) -> float:
-        """LSTM 序列训练：采样连续序列，用 forward_sequence 计算 Q 值。"""
-        seq_data = self.replay_buffer.sample_sequences(batch_size, self.lstm_seq_len)
-        if seq_data is None:
-            return 0.0
-
-        gamma = self.config.gamma
-        last_indices = seq_data["last_indices"]
-
-        local_seq = torch.from_numpy(seq_data["local_map"]).float().to(self.device)
-        global_seq = torch.from_numpy(seq_data["global_features"]).float().to(self.device)
-        actions = torch.from_numpy(seq_data["action"]).long().to(self.device)
-        rewards = torch.from_numpy(seq_data["reward"]).float().to(self.device)
-        dones = torch.from_numpy(seq_data["done"]).float().to(self.device)
-        next_local_seq = torch.from_numpy(seq_data["next_local_map"]).float().to(self.device)
-        next_global_seq = torch.from_numpy(seq_data["next_global_features"]).float().to(self.device)
-        next_masks = torch.from_numpy(seq_data["next_valid_action_mask"]).float().to(self.device)
-
-        B, T = actions.shape
-
-        self.online_net.train()
-        online_q = self.online_net.forward_sequence(local_seq, global_seq)  # (B, T, A)
-        current_q = online_q.gather(2, actions.unsqueeze(2)).squeeze(2)  # (B, T)
-
-        with torch.no_grad():
-            # Double DQN: online 选动作, target 评估
-            next_q_online = self.online_net.forward_sequence(next_local_seq, next_global_seq)
-            next_q_online_masked = self._mask_invalid_actions(next_q_online, next_masks)
-            next_actions = torch.argmax(next_q_online_masked, dim=2, keepdim=True)
-
-            next_q_target = self.target_net.forward_sequence(next_local_seq, next_global_seq)
-            next_q_target_masked = self._mask_invalid_actions(next_q_target, next_masks)
-            next_q = next_q_target_masked.gather(2, next_actions).squeeze(2)  # (B, T)
-
-            td_target = rewards + gamma * next_q * (1.0 - dones)
-
-            bc_q = self.bc_net.forward_sequence(local_seq, global_seq)
-            bc_expert = torch.argmax(bc_q, dim=2)  # (B, T)
-
-        td_errors = (current_q - td_target).abs()
-        td_loss = self.loss_fn(current_q, td_target)
-        bc_reg_weight = self._current_bc_reg_weight()
-        ce_loss = nn.functional.cross_entropy(
-            online_q.view(B * T, self.action_dim),
-            bc_expert.view(B * T),
-        )
-        loss = td_loss + bc_reg_weight * ce_loss
-
-        self.optimizer.zero_grad()
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.online_net.parameters(), self.config.max_gradient_norm)
-        self.optimizer.step()
-
-        # PER 更新：用平均 TD 误差更新序列末尾索引
-        mean_td = td_errors.mean(dim=1).detach().cpu().numpy()
-        self.replay_buffer.update_priorities(last_indices, mean_td, self.config.per_epsilon)
 
         self.training_steps += 1
         self.last_loss = float(td_loss.mean().item())
@@ -465,3 +395,4 @@ class DoubleDQNAgent:
         if online_unexpected:
             from warnings import warn
             warn(f"加载 checkpoint 时多余键（已忽略）: {online_unexpected}")
+
