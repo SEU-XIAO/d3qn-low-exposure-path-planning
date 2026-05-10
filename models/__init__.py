@@ -1,3 +1,19 @@
-﻿from .actor_critic_cnn import ActorCriticCNN, random_augment, deaugment_action, ACTIONS
+from .actor_critic_cnn import (
+    ACTIONS,
+    BACKBONE_LEGACY,
+    BACKBONE_RES_SMALL,
+    ActorCriticCNN,
+    deaugment_action,
+    infer_model_spec,
+    random_augment,
+)
 
-__all__ = ["ActorCriticCNN", "random_augment", "deaugment_action", "ACTIONS"]
+__all__ = [
+    "ACTIONS",
+    "BACKBONE_LEGACY",
+    "BACKBONE_RES_SMALL",
+    "ActorCriticCNN",
+    "deaugment_action",
+    "infer_model_spec",
+    "random_augment",
+]

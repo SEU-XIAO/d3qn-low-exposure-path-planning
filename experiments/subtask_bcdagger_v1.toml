@@ -1,0 +1,108 @@
+# 用法：
+#   python -m train.train_local_pool_ppo --config experiments/subtask_bcdagger_v1.toml
+#   python -m visualize.failure_case_report --config experiments/subtask_bcdagger_v1.toml
+#   python -m visualize.hierarchical_waypoint_eval --config experiments/subtask_bcdagger_v1.toml
+#
+# 覆盖单个参数时，命令行优先级更高，例如：
+#   python -m train.train_local_pool_ppo --config experiments/subtask_bcdagger_v1.toml --steps 800000
+
+[fragments.subtask_pool]
+pool = "artifacts/window_pool_10_subtask_30k.npz"
+val_ratio = 0.2
+curriculum = true
+eval_episodes = 50
+eval_full_every = 10
+
+[fragments.optimizer]
+lr = 1e-4
+entropy = 0.03
+epochs = 6
+backbone = "res_small"
+
+[fragments.planner_guide]
+planner_guide = true
+planner_guide_sigma = 1.4
+planner_w_len = 1.0
+planner_w_vis = 2.5
+planner_w_slope = 0.8
+planner_w_turn = 0.15
+
+[fragments.planner_eval]
+planner_guide_sigma = 1.4
+planner_w_len = 1.0
+planner_w_vis = 2.5
+planner_w_slope = 0.8
+planner_w_turn = 0.15
+
+[fragments.bc_dagger]
+expert_mode = "planner"
+bc_mode = "all"
+bc_weight = 0.15
+bc_pretrain_steps = 2000
+bc_pretrain_batch_size = 256
+bc_near_goal_radius = 4.0
+
+[fragments.near_goal_fix]
+near_goal_retreat_penalty = 0.3
+near_goal_osc_penalty = 0.15
+
+[fragments.eval_fallback]
+eval_fallback = true
+eval_fallback_goal_radius = 3.0
+eval_fallback_stagnation = 4
+eval_fallback_remaining_steps = 8
+eval_fallback_max_uses = 1
+
+[train_local_pool_ppo]
+inherits = [
+  "fragments.subtask_pool",
+  "fragments.optimizer",
+  "fragments.planner_guide",
+  "fragments.bc_dagger",
+  "fragments.near_goal_fix",
+  "fragments.eval_fallback",
+]
+save = "checkpoints_local_pool_subtask_bcdagger"
+steps = 500000
+envs = 8
+
+[failure_case_report]
+inherits = [
+  "fragments.subtask_pool",
+  "fragments.planner_eval",
+]
+model = "checkpoints_local_pool_subtask_bcdagger/policy_best.pt"
+output_dir = "analysis/subtask_bcdagger_failure_report"
+max_steps = 70
+limit = 0
+save_fail_maps = 40
+
+[hierarchical_waypoint_eval]
+inherits = [
+  "fragments.planner_eval",
+]
+model = "checkpoints_local_pool_subtask_bcdagger/policy_best.pt"
+output_dir = "analysis/hierarchical_50_eval_subtask_bcdagger"
+episodes = 100
+max_steps = 220
+policy_view_size = 10
+executor = "rl"
+subgoal_max_hop = 4
+w_len = 1.0
+w_vis = 2.5
+w_slope = 0.8
+w_turn = 0.15
+wp_spacing = 7
+wp_min_segment = 3
+wp_reach_radius = 1.5
+replan_stagnation = 10
+replan_collisions = 6
+replan_max = 4
+fallback_goal_radius = 3.0
+fallback_stagnation = 4
+fallback_remaining_steps = 8
+fallback_max_uses = 1
+fb_w_len = 1.0
+fb_w_vis = 2.0
+fb_w_slope = 0.6
+fb_w_turn = 0.1

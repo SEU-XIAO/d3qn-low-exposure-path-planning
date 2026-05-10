@@ -16,6 +16,7 @@ import numpy as np
 from config import EnvConfig
 from env.terrain_loader import FullTerrain, load_terrain
 from env.occlusion import is_occluded
+from planner import StealthCostConfig, plan_stealth_path
 
 
 class BattlefieldEnv:
@@ -382,14 +383,44 @@ class BattlefieldEnv:
         sigma2 = max(1.0, float(self.grid_size) * 0.08) ** 2
         ch_guide = np.exp(-dist2 / (2.0 * sigma2)).astype(np.float32)
 
-        obs = np.stack(
-            [
-                ch_height, ch_ground, ch_building, ch_tree, ch_vis,
-                ch_agent, ch_goal, ch_rel_dx, ch_rel_dy, ch_guide,
-            ],
-            axis=0,
-        )
+        channels = [
+            ch_height, ch_ground, ch_building, ch_tree, ch_vis,
+            ch_agent, ch_goal, ch_rel_dx, ch_rel_dy, ch_guide,
+        ]
+        if self.config.planner_guide_channel:
+            channels.append(self._planner_corridor_channel())
+
+        obs = np.stack(channels, axis=0)
         return obs.astype(np.float32)
+
+    def _planner_cfg(self) -> StealthCostConfig:
+        return StealthCostConfig(
+            w_len=self.config.planner_w_len,
+            w_vis=self.config.planner_w_vis,
+            w_slope=self.config.planner_w_slope,
+            w_turn=self.config.planner_w_turn,
+        )
+
+    def _planner_corridor_channel(self) -> np.ndarray:
+        H, W = self.grid_size, self.grid_size
+        start = tuple(self.agent_position.tolist())
+        goal = tuple(self.goal_position.tolist())
+        if start == goal:
+            out = np.zeros((H, W), dtype=np.float32)
+            out[start] = 1.0
+            return out
+
+        path = plan_stealth_path(self, start, goal, self._planner_cfg())
+        if not path:
+            return np.zeros((H, W), dtype=np.float32)
+
+        gx, gy = np.indices((H, W), dtype=np.float32)
+        pts = np.array(path, dtype=np.float32)
+        dx = gx[None, :, :] - pts[:, 0][:, None, None]
+        dy = gy[None, :, :] - pts[:, 1][:, None, None]
+        dist2 = np.min(dx * dx + dy * dy, axis=0)
+        sigma = max(0.5, float(self.config.planner_guide_sigma))
+        return np.exp(-dist2 / (2.0 * sigma * sigma)).astype(np.float32)
 
     def get_action_mask(self) -> np.ndarray:
         valid = self.get_valid_actions()

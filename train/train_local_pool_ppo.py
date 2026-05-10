@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import argparse
+import sys
 import time
 from collections import deque
 from dataclasses import replace
@@ -13,7 +14,14 @@ import torch.nn.functional as F
 
 from config import EnvConfig
 from env.vectorized_env import VectorizedEnv
-from models.actor_critic_cnn import ActorCriticCNN, deaugment_action, random_augment
+from experiment_config import add_config_args, dump_effective_config, parse_args_with_config
+from models.actor_critic_cnn import (
+    BACKBONE_LEGACY,
+    BACKBONE_RES_SMALL,
+    ActorCriticCNN,
+    deaugment_action,
+    random_augment,
+)
 from planner import StealthCostConfig, plan_stealth_path
 from train.ppo_buffer import RolloutBuffer
 from train.ppo_config import PPOConfig
@@ -157,6 +165,105 @@ def _bfs_next_action(env) -> int | None:
             return action_idx
         cur = prev
     return None
+
+
+def _planner_next_action(env, cfg: StealthCostConfig) -> int | None:
+    start = tuple(env.agent_position.tolist())
+    goal = tuple(env.goal_position.tolist())
+    if start == goal:
+        return None
+
+    path = plan_stealth_path(env, start, goal, cfg)
+    if not path or len(path) <= 1:
+        return None
+
+    move = (path[1][0] - start[0], path[1][1] - start[1])
+    return MOVE_TO_ACTION.get(move)
+
+
+def _expert_next_action(env, expert_mode: str, planner_cfg: StealthCostConfig) -> int | None:
+    if expert_mode == "planner":
+        action = _planner_next_action(env, planner_cfg)
+        if action is not None:
+            return action
+    return _bfs_next_action(env)
+
+
+def _fallback_valid_action(mask: np.ndarray) -> int:
+    valid = np.flatnonzero(mask)
+    if len(valid) == 0:
+        return 0
+    return int(valid[0])
+
+
+def _run_bc_pretrain(
+    policy: ActorCriticCNN,
+    optimizer: torch.optim.Optimizer,
+    vec_env: VectorizedEnv,
+    device: torch.device,
+    steps: int,
+    batch_size: int,
+    expert_mode: str,
+    planner_cfg: StealthCostConfig,
+) -> None:
+    if steps <= 0:
+        return
+
+    print(
+        f"启动 BC 预训练: steps={steps}, batch={batch_size}, expert={expert_mode}"
+    )
+    t0 = time.time()
+    num_envs = vec_env.num_envs
+
+    for step in range(1, steps + 1):
+        obs_chunks: list[torch.Tensor] = []
+        mask_chunks: list[torch.Tensor] = []
+        target_chunks: list[torch.Tensor] = []
+        collected = 0
+
+        while collected < batch_size:
+            obs_np = vec_env.get_observations().copy()
+            mask_np = vec_env.get_action_masks()
+            actions_np = np.zeros(num_envs, dtype=np.int64)
+            valid_indices: list[int] = []
+            valid_targets: list[int] = []
+
+            for i, env in enumerate(vec_env.envs):
+                expert_action = _expert_next_action(env, expert_mode=expert_mode, planner_cfg=planner_cfg)
+                if expert_action is None:
+                    actions_np[i] = _fallback_valid_action(mask_np[i])
+                else:
+                    actions_np[i] = int(expert_action)
+                    valid_indices.append(i)
+                    valid_targets.append(int(expert_action))
+
+            if valid_indices:
+                obs_chunks.append(torch.from_numpy(obs_np[valid_indices]).to(device))
+                mask_chunks.append(torch.from_numpy(mask_np[valid_indices]).to(device))
+                target_chunks.append(torch.tensor(valid_targets, dtype=torch.long, device=device))
+                collected += len(valid_indices)
+
+            vec_env.step(actions_np)
+
+        obs_batch = torch.cat(obs_chunks, dim=0)
+        mask_batch = torch.cat(mask_chunks, dim=0)
+        target_batch = torch.cat(target_chunks, dim=0)
+
+        log_probs, _values, entropy = policy.evaluate(obs_batch, target_batch, mask_batch)
+        bc_loss = -log_probs.mean()
+        loss = bc_loss - 0.001 * entropy.mean()
+
+        optimizer.zero_grad()
+        loss.backward()
+        nn.utils.clip_grad_norm_(policy.parameters(), 0.5)
+        optimizer.step()
+
+        if step == 1 or step % max(1, steps // 10) == 0 or step == steps:
+            elapsed = time.time() - t0
+            print(
+                f"  [BC] {step:>5}/{steps} | loss {bc_loss.item():.4f} | "
+                f"entropy {entropy.mean().item():.4f} | {elapsed:.0f}s"
+            )
 
 
 def _run_eval_episode(
@@ -350,7 +457,8 @@ def _evaluate_by_splits(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="局部窗口池 PPO 训练（并行）")
+    parser = argparse.ArgumentParser(description="局部窗口池 PPO 训练（并行）", allow_abbrev=False)
+    add_config_args(parser, default_section="train_local_pool_ppo")
     parser.add_argument("--steps", type=int, default=500_000)
     parser.add_argument("--pool", type=str, default="artifacts/window_pool_15.npz")
     parser.add_argument("--val-pool", type=str, default=None, help="独立验证池；为空则从训练池切分")
@@ -361,9 +469,16 @@ def main() -> None:
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--entropy", type=float, default=0.03)
     parser.add_argument("--epochs", type=int, default=6)
+    parser.add_argument("--backbone", type=str, default=BACKBONE_RES_SMALL, choices=[BACKBONE_LEGACY, BACKBONE_RES_SMALL])
     parser.add_argument("--max-steps", type=int, default=None)
     parser.add_argument("--visible-penalty", type=float, default=0.0, help="可见区域惩罚，建议先设0学到达再逐步加大")
     parser.add_argument("--progress-weight", type=float, default=0.25, help="朝目标推进奖励权重")
+    parser.add_argument("--planner-guide", action="store_true", help="在观测中加入局部 planner 走廊通道")
+    parser.add_argument("--planner-guide-sigma", type=float, default=1.4, help="planner 走廊通道高斯宽度")
+    parser.add_argument("--planner-w-len", type=float, default=1.0)
+    parser.add_argument("--planner-w-vis", type=float, default=2.5)
+    parser.add_argument("--planner-w-slope", type=float, default=0.8)
+    parser.add_argument("--planner-w-turn", type=float, default=0.15)
     parser.add_argument("--progress-decay-start", type=float, default=0.8, help="从训练进度该比例开始衰减 progress reward（默认0.8）")
     parser.add_argument("--progress-decay-end", type=float, default=1.05, help="progress reward 衰减结束的训练进度比例（默认1.05，等效弱衰减）")
     parser.add_argument("--save-every-evals", type=int, default=0)
@@ -375,10 +490,14 @@ def main() -> None:
     parser.add_argument("--near-goal-retreat-penalty", type=float, default=0.3, help="近终点离开惩罚系数")
     parser.add_argument("--near-goal-osc-radius", type=float, default=4.0, help="反向来回惩罚半径")
     parser.add_argument("--near-goal-osc-penalty", type=float, default=0.15, help="反向来回惩罚系数")
+    parser.add_argument("--expert-mode", type=str, default="planner", choices=["planner", "bfs"], help="BC/DAgger 使用的专家来源")
+    parser.add_argument("--bc-mode", type=str, default="off", choices=["off", "fail", "all"], help="off=关闭，fail=仅失败轨迹，all=所有访问状态")
     parser.add_argument("--bc-on-fail", action="store_true", help="对 timeout/stuck 轨迹启用BC辅助")
     parser.add_argument("--bc-weight", type=float, default=0.08, help="BC辅助损失权重")
     parser.add_argument("--bc-near-goal-only", action="store_true", help="BC仅使用近终点失败轨迹")
     parser.add_argument("--bc-near-goal-radius", type=float, default=4.0, help="BC近终点筛选半径")
+    parser.add_argument("--bc-pretrain-steps", type=int, default=0, help="先做纯 BC 预训练的优化步数")
+    parser.add_argument("--bc-pretrain-batch-size", type=int, default=256, help="BC 预训练每步采样的专家状态数")
     parser.add_argument("--no-augment", action="store_true", help="关闭训练时随机旋转/翻转增强")
     parser.add_argument("--force-augment", action="store_true", help="即使含方向语义通道也强制开启增强")
     parser.add_argument("--eval-fallback", action="store_true", help="评估时启用规则兜底并统计触发率")
@@ -389,11 +508,19 @@ def main() -> None:
     parser.add_argument("--eval-fallback-max-uses", type=int, default=1, help="每局评估最多触发兜底次数")
     parser.add_argument("--eval-episodes", type=int, default=50, help="常规评估样本数")
     parser.add_argument("--eval-full-every", type=int, default=10, help="每N次评估做一次全量评估，0关闭")
-    args = parser.parse_args()
+    args = parse_args_with_config(parser, default_section="train_local_pool_ppo")
+    if args.bc_on_fail:
+        if args.bc_mode != "off":
+            raise ValueError("--bc-on-fail 与 --bc-mode 不能同时指定")
+        args.bc_mode = "fail"
     if args.progress_decay_end <= args.progress_decay_start:
         raise ValueError("--progress-decay-end 必须大于 --progress-decay-start")
     if args.eval_fallback_max_uses < 1:
         raise ValueError("--eval-fallback-max-uses 必须 >= 1")
+    if args.bc_pretrain_steps < 0:
+        raise ValueError("--bc-pretrain-steps 必须 >= 0")
+    if args.bc_pretrain_batch_size < 1:
+        raise ValueError("--bc-pretrain-batch-size 必须 >= 1")
 
     train_data = np.load(Path(args.pool))
     pool = {
@@ -443,6 +570,12 @@ def main() -> None:
         max_steps=args.max_steps if args.max_steps is not None else adaptive_max_steps,
         visible_penalty=args.visible_penalty,
         progress_weight=args.progress_weight,
+        planner_guide_channel=args.planner_guide,
+        planner_guide_sigma=args.planner_guide_sigma,
+        planner_w_len=args.planner_w_len,
+        planner_w_vis=args.planner_w_vis,
+        planner_w_slope=args.planner_w_slope,
+        planner_w_turn=args.planner_w_turn,
     )
 
     num_envs = args.envs
@@ -466,8 +599,20 @@ def main() -> None:
 
     obs_channels = int(vec_env.get_observations().shape[1])
     feature_dim = 256 if env_config.grid_size <= 15 else 512
-    policy = ActorCriticCNN(in_channels=obs_channels, feature_dim=feature_dim).to(device)
+    policy = ActorCriticCNN(
+        in_channels=obs_channels,
+        feature_dim=feature_dim,
+        backbone_name=args.backbone,
+    ).to(device)
     optimizer = torch.optim.Adam(policy.parameters(), lr=ppo_cfg.learning_rate)
+    planner_cfg = StealthCostConfig(
+        w_len=args.planner_w_len,
+        w_vis=args.planner_w_vis,
+        w_slope=args.planner_w_slope,
+        w_turn=args.planner_w_turn,
+    )
+    use_bc_rollout = args.bc_mode != "off"
+    use_bc_pretrain = args.bc_pretrain_steps > 0
 
     if args.no_augment and args.force_augment:
         raise ValueError("--no-augment 与 --force-augment 不能同时使用")
@@ -478,11 +623,19 @@ def main() -> None:
         print("检测到方向语义通道（>7通道），默认关闭增强；如需强制开启请加 --force-augment")
     else:
         use_augment = True
-    if args.bc_on_fail and use_augment:
-        raise ValueError("当前实现中 --bc-on-fail 与数据增强不能同时使用，请关闭增强或关闭BC")
-    if args.bc_on_fail:
+    if (use_bc_rollout or use_bc_pretrain) and use_augment:
+        raise ValueError("当前实现中 BC 与数据增强不能同时使用，请关闭增强或关闭BC")
+    if args.planner_guide:
+        print(
+            f"启用 planner 走廊通道: sigma={args.planner_guide_sigma:g}, "
+            f"cost=({args.planner_w_len:g},{args.planner_w_vis:g},{args.planner_w_slope:g},{args.planner_w_turn:g})"
+        )
+    if use_bc_rollout or use_bc_pretrain:
         near_desc = f"，仅近终点<= {args.bc_near_goal_radius:g}" if args.bc_near_goal_only else ""
-        print(f"启用失败轨迹BC辅助: weight={args.bc_weight:.3f}（仅timeout/stuck{near_desc}）")
+        print(
+            f"启用 BC/DAgger: mode={args.bc_mode}, pretrain={args.bc_pretrain_steps}, "
+            f"weight={args.bc_weight:.3f}, expert={args.expert_mode}{near_desc}"
+        )
 
     buffer = RolloutBuffer(
         ppo_cfg.rollout_steps,
@@ -504,6 +657,19 @@ def main() -> None:
         easy_idx = mid_idx = hard_idx = train_indices
         curriculum_rng = np.random.default_rng(2027)
 
+    if use_bc_pretrain:
+        vec_env.set_allowed_indices(train_indices)
+        _run_bc_pretrain(
+            policy,
+            optimizer,
+            vec_env,
+            device=device,
+            steps=args.bc_pretrain_steps,
+            batch_size=args.bc_pretrain_batch_size,
+            expert_mode=args.expert_mode,
+            planner_cfg=planner_cfg,
+        )
+
     global_step = 0
     episode_reward = 0.0
     episode_count = 0
@@ -513,6 +679,20 @@ def main() -> None:
     milestone_paths: deque[Path] = deque()
     save_path = Path(args.save)
     save_path.mkdir(parents=True, exist_ok=True)
+    config_snapshot = dump_effective_config(
+        save_path,
+        args,
+        runtime={
+            "argv": sys.argv[1:],
+            "device": str(device),
+            "obs_channels": obs_channels,
+            "feature_dim": feature_dim,
+            "num_params": n_params,
+            "planner_guide_channel": env_config.planner_guide_channel,
+            "resolved_save_dir": str(save_path.resolve()),
+        },
+    )
+    print(f"实验配置已保存: {config_snapshot}")
 
     t_start = time.time()
     obs_batch = vec_env.get_observations()
@@ -578,9 +758,13 @@ def main() -> None:
 
             expert_actions = [-1 for _ in range(num_envs)]
             expert_valid = [False for _ in range(num_envs)]
-            if args.bc_on_fail:
+            if use_bc_rollout:
                 for i in range(num_envs):
-                    a_exp = _bfs_next_action(vec_env.envs[i])
+                    a_exp = _expert_next_action(
+                        vec_env.envs[i],
+                        expert_mode=args.expert_mode,
+                        planner_cfg=planner_cfg,
+                    )
                     if a_exp is not None:
                         expert_actions[i] = int(a_exp)
                         expert_valid[i] = True
@@ -626,20 +810,25 @@ def main() -> None:
             for i in range(num_envs):
                 slot = int(buffer.ptr)
                 buffer.add(aug_obs[i], aug_actions[i], log_probs[i], float(rewards[i]), values[i], bool(dones[i]), aug_mask[i])
-                if args.bc_on_fail:
+                if use_bc_rollout:
                     if expert_valid[i]:
                         bc_target_actions[slot] = expert_actions[i]
                         bc_target_valid[slot] = True
                         bc_is_near_goal[slot] = bool(old_dists[i] <= args.bc_near_goal_radius)
-                    episode_slots[i].append(slot)
-                    if dones[i]:
-                        if infos[i].get("result") in ("timeout", "stuck"):
-                            for s in episode_slots[i]:
-                                if bool(bc_target_valid[s]) and (
-                                    (not args.bc_near_goal_only) or bool(bc_is_near_goal[s])
-                                ):
-                                    bc_use_mask[s] = True
-                        episode_slots[i].clear()
+                        if args.bc_mode == "all" and (
+                            (not args.bc_near_goal_only) or bool(bc_is_near_goal[slot])
+                        ):
+                            bc_use_mask[slot] = True
+                    if args.bc_mode == "fail":
+                        episode_slots[i].append(slot)
+                        if dones[i]:
+                            if infos[i].get("result") in ("timeout", "stuck"):
+                                for s in episode_slots[i]:
+                                    if bool(bc_target_valid[s]) and (
+                                        (not args.bc_near_goal_only) or bool(bc_is_near_goal[s])
+                                    ):
+                                        bc_use_mask[s] = True
+                            episode_slots[i].clear()
                 episode_reward += float(rewards[i])
                 global_step += 1
                 if dones[i]:
@@ -680,7 +869,7 @@ def main() -> None:
                 policy_loss = -torch.min(surr1, surr2).mean()
                 value_loss = F.mse_loss(values, mb_returns)
                 bc_loss = torch.tensor(0.0, device=device)
-                if args.bc_on_fail and args.bc_weight > 0.0:
+                if use_bc_rollout and args.bc_weight > 0.0:
                     mb_bc_use = bc_use_mask[indices]
                     if torch.any(mb_bc_use):
                         mb_bc_obs = mb_obs[mb_bc_use]

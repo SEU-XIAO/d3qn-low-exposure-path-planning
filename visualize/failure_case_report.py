@@ -11,7 +11,8 @@ import torch
 
 from config import EnvConfig
 from env.vectorized_env import VectorizedEnv
-from models.actor_critic_cnn import ActorCriticCNN
+from experiment_config import add_config_args, parse_args_with_config
+from models.actor_critic_cnn import ActorCriticCNN, infer_model_spec
 
 
 def _split_indices(n_scene: int, val_ratio: float, seed: int = 2026) -> tuple[np.ndarray, np.ndarray]:
@@ -95,7 +96,8 @@ def _render_ascii_map(env, trajectory: list[list[int]]) -> str:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Evaluate model and export failure cases on fixed val split")
+    parser = argparse.ArgumentParser(description="Evaluate model and export failure cases on fixed val split", allow_abbrev=False)
+    add_config_args(parser, default_section="failure_case_report")
     parser.add_argument("--pool", type=str, default="artifacts/window_pool_10.npz")
     parser.add_argument("--model", type=str, required=True)
     parser.add_argument("--output-dir", type=str, default="analysis/failure_report")
@@ -104,7 +106,12 @@ def main() -> None:
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--limit", type=int, default=0, help="0 means evaluate full val set")
     parser.add_argument("--save-fail-maps", type=int, default=40, help="number of failed cases to render")
-    args = parser.parse_args()
+    parser.add_argument("--planner-guide-sigma", type=float, default=1.4)
+    parser.add_argument("--planner-w-len", type=float, default=1.0)
+    parser.add_argument("--planner-w-vis", type=float, default=2.5)
+    parser.add_argument("--planner-w-slope", type=float, default=0.8)
+    parser.add_argument("--planner-w-turn", type=float, default=0.15)
+    args = parse_args_with_config(parser, default_section="failure_case_report")
 
     data = np.load(Path(args.pool))
     pool = {
@@ -124,21 +131,31 @@ def main() -> None:
         val_indices = val_indices[: args.limit]
         val_bfs = val_bfs[: args.limit]
 
+    device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
+    state_dict = torch.load(Path(args.model), map_location=device)
+    model_spec = infer_model_spec(state_dict)
+    expected_channels = int(model_spec["in_channels"])
+
     grid_size = int(pool["heights"].shape[1])
     env_config = replace(
         EnvConfig(),
         grid_size=grid_size,
         local_map_size=grid_size,
         max_steps=args.max_steps,
+        planner_guide_channel=expected_channels > 10,
+        planner_guide_sigma=args.planner_guide_sigma,
+        planner_w_len=args.planner_w_len,
+        planner_w_vis=args.planner_w_vis,
+        planner_w_slope=args.planner_w_slope,
+        planner_w_turn=args.planner_w_turn,
     )
     vec_env = VectorizedEnv(env_config, pool, num_envs=1, seed=7, allowed_indices=val_indices)
     env = vec_env.envs[0]
 
-    device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
     obs_channels = int(vec_env.get_observations().shape[1])
-    feature_dim = 256 if grid_size <= 15 else 512
-    policy = ActorCriticCNN(in_channels=obs_channels, feature_dim=feature_dim).to(device)
-    state_dict = torch.load(Path(args.model), map_location=device)
+    if obs_channels != expected_channels:
+        raise RuntimeError(f"observation channels mismatch: env={obs_channels}, ckpt={expected_channels}")
+    policy = ActorCriticCNN.from_state_dict(state_dict).to(device)
     policy.load_state_dict(state_dict)
     policy.eval()
 
