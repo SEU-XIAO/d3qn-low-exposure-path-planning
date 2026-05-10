@@ -29,6 +29,17 @@ MOVE_TO_ACTION = {
     (1, 1): 7,
 }
 
+OPPOSITE_ACTION = {
+    0: 1,
+    1: 0,
+    2: 3,
+    3: 2,
+    4: 7,
+    5: 6,
+    6: 5,
+    7: 4,
+}
+
 
 def _split_curriculum_indices(bfs_lengths: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     q1 = np.quantile(bfs_lengths, 0.33)
@@ -112,12 +123,61 @@ def _apply_fallback_if_needed(env, cfg: StealthCostConfig) -> tuple[bool, bool]:
     return True, tuple(env.agent_position.tolist()) == goal
 
 
-def _run_eval_episode(policy: ActorCriticCNN, env, device: torch.device, use_fallback: bool) -> dict:
+def _bfs_next_action(env) -> int | None:
+    start = tuple(env.agent_position.tolist())
+    goal = tuple(env.goal_position.tolist())
+    if start == goal:
+        return None
+
+    queue: deque[tuple[int, int]] = deque([start])
+    visited = {start}
+    parent: dict[tuple[int, int], tuple[tuple[int, int], int]] = {}
+
+    while queue:
+        cur = queue.popleft()
+        if cur == goal:
+            break
+        cur_arr = np.array(cur, dtype=np.int32)
+        for action_idx in env.get_valid_actions(cur_arr):
+            move = np.array(env.ACTIONS[action_idx], dtype=np.int32)
+            nxt = tuple((cur_arr + move).tolist())
+            if nxt in visited:
+                continue
+            visited.add(nxt)
+            parent[nxt] = (cur, int(action_idx))
+            queue.append(nxt)
+
+    if goal not in parent:
+        return None
+
+    cur = goal
+    while cur in parent:
+        prev, action_idx = parent[cur]
+        if prev == start:
+            return action_idx
+        cur = prev
+    return None
+
+
+def _run_eval_episode(
+    policy: ActorCriticCNN,
+    env,
+    device: torch.device,
+    use_fallback: bool,
+    fallback_near_goal_only: bool,
+    fallback_goal_radius: float,
+    fallback_stagnation: int,
+    fallback_remaining_steps: int,
+    fallback_max_uses: int,
+) -> dict:
     obs = env._get_observation()
     done = False
     ep_steps = 0
     ep_exposed = 0
     fallback_used = False
+    fallback_used_count = 0
+    near_goal_fallback_count = 0
+    fallback_success_count = 0
     best_dist = float(np.linalg.norm(env.agent_position.astype(np.float32) - env.goal_position.astype(np.float32)))
     stagnation = 0
 
@@ -141,13 +201,19 @@ def _run_eval_episode(policy: ActorCriticCNN, env, device: torch.device, use_fal
         else:
             stagnation += 1
 
-        near_timeout = (env.config.max_steps - env.steps) <= 10
-        if use_fallback and not done and (stagnation >= 12 or near_timeout):
-            used, success = _apply_fallback_if_needed(env, fallback_cfg)
-            if used:
-                fallback_used = True
-                done = True
-                info = {"result": "success" if success else "fallback_fail", "collisions": env.total_collisions}
+        near_timeout = (env.config.max_steps - env.steps) <= fallback_remaining_steps
+        near_goal = dist <= fallback_goal_radius
+        trigger = (stagnation >= fallback_stagnation) or near_timeout
+        if use_fallback and not done and trigger and fallback_used_count < max(1, fallback_max_uses):
+            if (not fallback_near_goal_only) or near_goal:
+                used, success = _apply_fallback_if_needed(env, fallback_cfg)
+                if used:
+                    fallback_used = True
+                    fallback_used_count += 1
+                    near_goal_fallback_count += int(near_goal)
+                    fallback_success_count += int(success)
+                    done = True
+                    info = {"result": "success" if success else "fallback_fail", "collisions": env.total_collisions}
 
     return {
         "success": info.get("result") == "success",
@@ -156,6 +222,8 @@ def _run_eval_episode(policy: ActorCriticCNN, env, device: torch.device, use_fal
         "collisions": info.get("collisions", 0),
         "exposure": ep_exposed / max(1, ep_steps),
         "fallback_used": fallback_used,
+        "near_goal_fallback_count": near_goal_fallback_count,
+        "fallback_success_count": fallback_success_count,
     }
 
 
@@ -166,6 +234,11 @@ def _evaluate_fixed(
     eval_indices: np.ndarray,
     num_episodes: int,
     use_fallback: bool,
+    fallback_near_goal_only: bool,
+    fallback_goal_radius: float,
+    fallback_stagnation: int,
+    fallback_remaining_steps: int,
+    fallback_max_uses: int,
 ) -> dict:
     env = vec_env.envs[0]
     n = min(num_episodes, len(eval_indices))
@@ -176,6 +249,11 @@ def _evaluate_fixed(
             "avg_collisions": 0.0,
             "avg_exposure_ratio": 0.0,
             "fallback_rate": 0.0,
+            "near_goal_fallback_rate": 0.0,
+            "fallback_salvage_rate": 0.0,
+            "timeout_rate": 0.0,
+            "stuck_rate": 0.0,
+            "fallback_fail_rate": 0.0,
         }
 
     succ = 0
@@ -186,10 +264,22 @@ def _evaluate_fixed(
     timeout_count = 0
     stuck_count = 0
     fallback_fail_count = 0
+    near_goal_fallback_count = 0
+    fallback_success_count = 0
 
     for i in range(n):
         vec_env.reset_env_to_index(0, int(eval_indices[i]))
-        out = _run_eval_episode(policy, env, device, use_fallback=use_fallback)
+        out = _run_eval_episode(
+            policy,
+            env,
+            device,
+            use_fallback=use_fallback,
+            fallback_near_goal_only=fallback_near_goal_only,
+            fallback_goal_radius=fallback_goal_radius,
+            fallback_stagnation=fallback_stagnation,
+            fallback_remaining_steps=fallback_remaining_steps,
+            fallback_max_uses=fallback_max_uses,
+        )
         succ += int(out["success"])
         total_steps += int(out["steps"])
         total_collisions += int(out["collisions"])
@@ -198,6 +288,8 @@ def _evaluate_fixed(
         timeout_count += int(out["result"] == "timeout")
         stuck_count += int(out["result"] == "stuck")
         fallback_fail_count += int(out["result"] == "fallback_fail")
+        near_goal_fallback_count += int(out["near_goal_fallback_count"])
+        fallback_success_count += int(out["fallback_success_count"])
 
     return {
         "success_rate": succ / n,
@@ -205,6 +297,8 @@ def _evaluate_fixed(
         "avg_collisions": total_collisions / n,
         "avg_exposure_ratio": total_exposure / n,
         "fallback_rate": fallback_count / n,
+        "near_goal_fallback_rate": near_goal_fallback_count / n,
+        "fallback_salvage_rate": fallback_success_count / max(1, fallback_count),
         "timeout_rate": timeout_count / n,
         "stuck_rate": stuck_count / n,
         "fallback_fail_rate": fallback_fail_count / n,
@@ -219,6 +313,11 @@ def _evaluate_by_splits(
     val_bfs_lengths: np.ndarray,
     num_episodes: int,
     use_fallback: bool,
+    fallback_near_goal_only: bool,
+    fallback_goal_radius: float,
+    fallback_stagnation: int,
+    fallback_remaining_steps: int,
+    fallback_max_uses: int,
 ) -> dict[str, dict]:
     q1 = np.quantile(val_bfs_lengths, 0.33)
     q2 = np.quantile(val_bfs_lengths, 0.66)
@@ -241,6 +340,11 @@ def _evaluate_by_splits(
             eval_indices=idxs,
             num_episodes=min(num_episodes, len(idxs)),
             use_fallback=use_fallback,
+            fallback_near_goal_only=fallback_near_goal_only,
+            fallback_goal_radius=fallback_goal_radius,
+            fallback_stagnation=fallback_stagnation,
+            fallback_remaining_steps=fallback_remaining_steps,
+            fallback_max_uses=fallback_max_uses,
         )
     return split_results
 
@@ -267,14 +371,29 @@ def main() -> None:
     parser.add_argument("--curriculum", action="store_true", help="启用BFS难度课程")
     parser.add_argument("--curriculum-hard-switch", action="store_true", help="课程使用旧版硬切换（默认使用混合采样）")
     parser.add_argument("--timeout-extra-penalty", type=float, default=0.0, help="训练时对 timeout 额外扣分（在环境原始奖励基础上叠加）")
+    parser.add_argument("--near-goal-retreat-radius", type=float, default=3.0, help="近终点离开惩罚半径")
+    parser.add_argument("--near-goal-retreat-penalty", type=float, default=0.3, help="近终点离开惩罚系数")
+    parser.add_argument("--near-goal-osc-radius", type=float, default=4.0, help="反向来回惩罚半径")
+    parser.add_argument("--near-goal-osc-penalty", type=float, default=0.15, help="反向来回惩罚系数")
+    parser.add_argument("--bc-on-fail", action="store_true", help="对 timeout/stuck 轨迹启用BC辅助")
+    parser.add_argument("--bc-weight", type=float, default=0.08, help="BC辅助损失权重")
+    parser.add_argument("--bc-near-goal-only", action="store_true", help="BC仅使用近终点失败轨迹")
+    parser.add_argument("--bc-near-goal-radius", type=float, default=4.0, help="BC近终点筛选半径")
     parser.add_argument("--no-augment", action="store_true", help="关闭训练时随机旋转/翻转增强")
     parser.add_argument("--force-augment", action="store_true", help="即使含方向语义通道也强制开启增强")
     parser.add_argument("--eval-fallback", action="store_true", help="评估时启用规则兜底并统计触发率")
+    parser.add_argument("--eval-fallback-anywhere", action="store_true", help="评估兜底允许在任意距离触发（默认仅近终点）")
+    parser.add_argument("--eval-fallback-goal-radius", type=float, default=3.0, help="评估兜底近终点触发半径")
+    parser.add_argument("--eval-fallback-stagnation", type=int, default=4, help="评估兜底停滞步数阈值")
+    parser.add_argument("--eval-fallback-remaining-steps", type=int, default=8, help="评估兜底剩余步数阈值")
+    parser.add_argument("--eval-fallback-max-uses", type=int, default=1, help="每局评估最多触发兜底次数")
     parser.add_argument("--eval-episodes", type=int, default=50, help="常规评估样本数")
     parser.add_argument("--eval-full-every", type=int, default=10, help="每N次评估做一次全量评估，0关闭")
     args = parser.parse_args()
     if args.progress_decay_end <= args.progress_decay_start:
         raise ValueError("--progress-decay-end 必须大于 --progress-decay-start")
+    if args.eval_fallback_max_uses < 1:
+        raise ValueError("--eval-fallback-max-uses 必须 >= 1")
 
     train_data = np.load(Path(args.pool))
     pool = {
@@ -359,6 +478,11 @@ def main() -> None:
         print("检测到方向语义通道（>7通道），默认关闭增强；如需强制开启请加 --force-augment")
     else:
         use_augment = True
+    if args.bc_on_fail and use_augment:
+        raise ValueError("当前实现中 --bc-on-fail 与数据增强不能同时使用，请关闭增强或关闭BC")
+    if args.bc_on_fail:
+        near_desc = f"，仅近终点<= {args.bc_near_goal_radius:g}" if args.bc_near_goal_only else ""
+        print(f"启用失败轨迹BC辅助: weight={args.bc_weight:.3f}（仅timeout/stuck{near_desc}）")
 
     buffer = RolloutBuffer(
         ppo_cfg.rollout_steps,
@@ -392,6 +516,15 @@ def main() -> None:
 
     t_start = time.time()
     obs_batch = vec_env.get_observations()
+    fallback_near_goal_only = not args.eval_fallback_anywhere
+    if args.eval_fallback:
+        mode = "近终点窄触发" if fallback_near_goal_only else "全局触发"
+        print(
+            f"评估兜底模式: {mode} | r={args.eval_fallback_goal_radius:g}, "
+            f"stagnation>={args.eval_fallback_stagnation}, rem_steps<={args.eval_fallback_remaining_steps}, "
+            f"max_uses={args.eval_fallback_max_uses}"
+        )
+    prev_action_per_env: list[int | None] = [None for _ in range(num_envs)]
 
     while global_step < ppo_cfg.total_steps:
         progress = global_step / ppo_cfg.total_steps
@@ -423,6 +556,11 @@ def main() -> None:
             vec_env.set_progress_weight(env_config.progress_weight)
 
         parallel_steps = ppo_cfg.rollout_steps // num_envs
+        bc_use_mask = torch.zeros(ppo_cfg.rollout_steps, dtype=torch.bool, device=device)
+        bc_target_valid = torch.zeros(ppo_cfg.rollout_steps, dtype=torch.bool, device=device)
+        bc_target_actions = torch.zeros(ppo_cfg.rollout_steps, dtype=torch.long, device=device)
+        bc_is_near_goal = torch.zeros(ppo_cfg.rollout_steps, dtype=torch.bool, device=device)
+        episode_slots: list[list[int]] = [[] for _ in range(num_envs)]
         for _ in range(parallel_steps):
             obs_t = torch.from_numpy(obs_batch).to(device)
             mask_t = torch.from_numpy(vec_env.get_action_masks()).to(device)
@@ -438,14 +576,70 @@ def main() -> None:
                     aug_actions, log_probs, values, _, _ = policy(aug_obs, aug_mask)
                 orig_actions = aug_actions
 
+            expert_actions = [-1 for _ in range(num_envs)]
+            expert_valid = [False for _ in range(num_envs)]
+            if args.bc_on_fail:
+                for i in range(num_envs):
+                    a_exp = _bfs_next_action(vec_env.envs[i])
+                    if a_exp is not None:
+                        expert_actions[i] = int(a_exp)
+                        expert_valid[i] = True
+
+            old_dists = [
+                float(
+                    np.linalg.norm(
+                        env.agent_position.astype(np.float32) - env.goal_position.astype(np.float32)
+                    )
+                )
+                for env in vec_env.envs
+            ]
             next_obs_batch, rewards, dones, infos = vec_env.step(orig_actions.cpu().numpy())
             if args.timeout_extra_penalty > 0.0:
                 for i in range(num_envs):
                     if bool(dones[i]) and infos[i].get("result") == "timeout":
                         rewards[i] -= float(args.timeout_extra_penalty)
+            for i in range(num_envs):
+                if bool(dones[i]):
+                    prev_action_per_env[i] = None
+                    continue
+                new_dist = float(
+                    np.linalg.norm(
+                        vec_env.envs[i].agent_position.astype(np.float32)
+                        - vec_env.envs[i].goal_position.astype(np.float32)
+                    )
+                )
+                if (
+                    args.near_goal_retreat_penalty > 0.0
+                    and old_dists[i] <= args.near_goal_retreat_radius
+                    and new_dist > old_dists[i] + 1e-6
+                ):
+                    rewards[i] -= float(args.near_goal_retreat_penalty)
+                if (
+                    args.near_goal_osc_penalty > 0.0
+                    and old_dists[i] <= args.near_goal_osc_radius
+                    and prev_action_per_env[i] is not None
+                    and int(orig_actions[i].item()) == OPPOSITE_ACTION[int(prev_action_per_env[i])]
+                ):
+                    rewards[i] -= float(args.near_goal_osc_penalty)
+                prev_action_per_env[i] = int(orig_actions[i].item())
 
             for i in range(num_envs):
+                slot = int(buffer.ptr)
                 buffer.add(aug_obs[i], aug_actions[i], log_probs[i], float(rewards[i]), values[i], bool(dones[i]), aug_mask[i])
+                if args.bc_on_fail:
+                    if expert_valid[i]:
+                        bc_target_actions[slot] = expert_actions[i]
+                        bc_target_valid[slot] = True
+                        bc_is_near_goal[slot] = bool(old_dists[i] <= args.bc_near_goal_radius)
+                    episode_slots[i].append(slot)
+                    if dones[i]:
+                        if infos[i].get("result") in ("timeout", "stuck"):
+                            for s in episode_slots[i]:
+                                if bool(bc_target_valid[s]) and (
+                                    (not args.bc_near_goal_only) or bool(bc_is_near_goal[s])
+                                ):
+                                    bc_use_mask[s] = True
+                        episode_slots[i].clear()
                 episode_reward += float(rewards[i])
                 global_step += 1
                 if dones[i]:
@@ -466,6 +660,8 @@ def main() -> None:
         total_policy_loss = 0.0
         total_value_loss = 0.0
         total_entropy = 0.0
+        total_bc_loss = 0.0
+        n_bc_updates = 0
         n_updates = 0
 
         for _ in range(ppo_cfg.ppo_epochs):
@@ -483,7 +679,23 @@ def main() -> None:
                 surr2 = torch.clamp(ratio, 1.0 - ppo_cfg.clip_epsilon, 1.0 + ppo_cfg.clip_epsilon) * mb_advantages
                 policy_loss = -torch.min(surr1, surr2).mean()
                 value_loss = F.mse_loss(values, mb_returns)
-                loss = policy_loss + ppo_cfg.value_coef * value_loss - ppo_cfg.entropy_coef * entropy.mean()
+                bc_loss = torch.tensor(0.0, device=device)
+                if args.bc_on_fail and args.bc_weight > 0.0:
+                    mb_bc_use = bc_use_mask[indices]
+                    if torch.any(mb_bc_use):
+                        mb_bc_obs = mb_obs[mb_bc_use]
+                        mb_bc_masks = mb_masks[mb_bc_use]
+                        mb_bc_targets = bc_target_actions[indices][mb_bc_use]
+                        bc_log_probs, _bc_values, _bc_entropy = policy.evaluate(mb_bc_obs, mb_bc_targets, mb_bc_masks)
+                        bc_loss = -bc_log_probs.mean()
+                        total_bc_loss += bc_loss.item()
+                        n_bc_updates += 1
+                loss = (
+                    policy_loss
+                    + ppo_cfg.value_coef * value_loss
+                    - ppo_cfg.entropy_coef * entropy.mean()
+                    + args.bc_weight * bc_loss
+                )
 
                 optimizer.zero_grad()
                 loss.backward()
@@ -503,6 +715,7 @@ def main() -> None:
             f"p_loss {total_policy_loss / max(1, n_updates):>7.4f} | "
             f"v_loss {total_value_loss / max(1, n_updates):>7.4f} | "
             f"ent {total_entropy / max(1, n_updates):.4f} | "
+            f"bc {total_bc_loss / max(1, n_bc_updates):.4f} | "
             f"avg_rew {episode_reward / max(1, episode_count):>7.2f} | {elapsed:.0f}s"
         )
 
@@ -515,11 +728,17 @@ def main() -> None:
                 eval_indices=val_indices,
                 num_episodes=min(ppo_cfg.num_eval_episodes, len(val_indices)),
                 use_fallback=args.eval_fallback,
+                fallback_near_goal_only=fallback_near_goal_only,
+                fallback_goal_radius=args.eval_fallback_goal_radius,
+                fallback_stagnation=args.eval_fallback_stagnation,
+                fallback_remaining_steps=args.eval_fallback_remaining_steps,
+                fallback_max_uses=args.eval_fallback_max_uses,
             )
             print(
                 f"  >>> Eval @ {global_step:>8,} | success {results['success_rate']:.1%} | "
                 f"steps {results['avg_steps']:.1f} | collisions {results['avg_collisions']:.2f} | "
                 f"exposure {results['avg_exposure_ratio']:.3f} | fallback {results['fallback_rate']:.1%} | "
+                f"near_fb {results['near_goal_fallback_rate']:.1%} | fb_succ {results['fallback_salvage_rate']:.1%} | "
                 f"timeout {results['timeout_rate']:.1%} | stuck {results['stuck_rate']:.1%} | "
                 f"fb_fail {results['fallback_fail_rate']:.1%}"
             )
@@ -531,6 +750,11 @@ def main() -> None:
                 val_bfs_lengths=val_bfs_lengths,
                 num_episodes=min(ppo_cfg.num_eval_episodes, len(val_indices)),
                 use_fallback=args.eval_fallback,
+                fallback_near_goal_only=fallback_near_goal_only,
+                fallback_goal_radius=args.eval_fallback_goal_radius,
+                fallback_stagnation=args.eval_fallback_stagnation,
+                fallback_remaining_steps=args.eval_fallback_remaining_steps,
+                fallback_max_uses=args.eval_fallback_max_uses,
             )
             print(
                 "      split | "
@@ -547,12 +771,19 @@ def main() -> None:
                     eval_indices=val_indices,
                     num_episodes=len(val_indices),
                     use_fallback=args.eval_fallback,
+                    fallback_near_goal_only=fallback_near_goal_only,
+                    fallback_goal_radius=args.eval_fallback_goal_radius,
+                    fallback_stagnation=args.eval_fallback_stagnation,
+                    fallback_remaining_steps=args.eval_fallback_remaining_steps,
+                    fallback_max_uses=args.eval_fallback_max_uses,
                 )
                 print(
                     "      full  | "
                     f"success {full_results['success_rate']:.1%} | "
                     f"steps {full_results['avg_steps']:.1f} | "
                     f"exposure {full_results['avg_exposure_ratio']:.3f} | "
+                    f"near_fb {full_results['near_goal_fallback_rate']:.1%} | "
+                    f"fb_succ {full_results['fallback_salvage_rate']:.1%} | "
                     f"timeout {full_results['timeout_rate']:.1%} | "
                     f"stuck {full_results['stuck_rate']:.1%} | "
                     f"fb_fail {full_results['fallback_fail_rate']:.1%}"
