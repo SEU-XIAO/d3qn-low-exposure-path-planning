@@ -1,0 +1,14 @@
+{
+  "n_eval": 10,
+  "success_rate": 1.0,
+  "timeout_rate": 0.0,
+  "avg_steps": 42.8,
+  "avg_exposure": 0.025,
+  "fallback_episode_rate": 0.0,
+  "fallback_use_per_ep": 0.0,
+  "near_goal_fallback_use_per_ep": 0.0,
+  "fallback_salvage_rate": 0.0,
+  "raw_success_without_fallback": 1.0,
+  "avg_replan_count": 0.0,
+  "avg_waypoint_count": 12.8
+}
