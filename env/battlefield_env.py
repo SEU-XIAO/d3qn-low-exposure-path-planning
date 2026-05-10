@@ -362,8 +362,33 @@ class BattlefieldEnv:
         gx, gy = int(self.goal_position[0]), int(self.goal_position[1])
         ch_goal = np.zeros((H, W), dtype=np.float32)
         ch_goal[gx, gy] = 1.0
+        # 相对子目标向量编码：在整图复制归一化 dx/dy，给策略显式方向信号
+        dx = (gx - ax) / max(1.0, float(W - 1))
+        dy = (gy - ay) / max(1.0, float(H - 1))
+        ch_rel_dx = np.full((H, W), dx, dtype=np.float32)
+        ch_rel_dy = np.full((H, W), dy, dtype=np.float32)
 
-        obs = np.stack([ch_height, ch_ground, ch_building, ch_tree, ch_vis, ch_agent, ch_goal], axis=0)
+        # 局部引导通道：沿 agent->goal 连线的高斯带，帮助策略学习“朝向子目标”
+        yy, xx = np.mgrid[0:H, 0:W]
+        p0 = np.array([ax, ay], dtype=np.float32)
+        p1 = np.array([gx, gy], dtype=np.float32)
+        v = p1 - p0
+        denom = float(v[0] * v[0] + v[1] * v[1]) + 1e-6
+        t = ((xx - p0[0]) * v[0] + (yy - p0[1]) * v[1]) / denom
+        t = np.clip(t, 0.0, 1.0)
+        proj_x = p0[0] + t * v[0]
+        proj_y = p0[1] + t * v[1]
+        dist2 = (xx - proj_x) ** 2 + (yy - proj_y) ** 2
+        sigma2 = max(1.0, float(self.grid_size) * 0.08) ** 2
+        ch_guide = np.exp(-dist2 / (2.0 * sigma2)).astype(np.float32)
+
+        obs = np.stack(
+            [
+                ch_height, ch_ground, ch_building, ch_tree, ch_vis,
+                ch_agent, ch_goal, ch_rel_dx, ch_rel_dy, ch_guide,
+            ],
+            axis=0,
+        )
         return obs.astype(np.float32)
 
     def get_action_mask(self) -> np.ndarray:

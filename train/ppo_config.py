@@ -33,3 +33,14 @@ class PPOConfig:
     # —— 进度奖励衰减 ——
     progress_decay_start: float = 0.5   # 训练进度 50% 时开始衰减
     progress_decay_end: float = 0.9     # 训练进度 90% 时完全衰减为 0
+
+    # —— 分层选点课程（默认关闭） ——
+    enable_waypoint_curriculum: bool = False
+    waypoint_spacing: int = 6
+    waypoint_reach_radius: float = 1.0
+    waypoint_reward: float = 6.0
+    replan_stuck_collisions: int = 4
+    stealth_w_len: float = 1.0
+    stealth_w_vis: float = 3.0
+    stealth_w_slope: float = 0.8
+    stealth_w_turn: float = 0.15

@@ -24,10 +24,10 @@ _NUM_ACTIONS = len(ACTIONS)
 class _CNNBackbone(nn.Module):
     """特征提取器：7×50×50 → 8192 → 512."""
 
-    def __init__(self):
+    def __init__(self, in_channels: int = 7, feature_dim: int = 512):
         super().__init__()
         self.conv = nn.Sequential(
-            nn.Conv2d(7, 32, kernel_size=5, stride=2, padding=2),   # (32, 25, 25)
+            nn.Conv2d(in_channels, 32, kernel_size=5, stride=2, padding=2),   # (32, 25, 25)
             nn.ReLU(inplace=True),
             nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),  # (64, 13, 13)
             nn.ReLU(inplace=True),
@@ -38,7 +38,7 @@ class _CNNBackbone(nn.Module):
         )
         self.pool = nn.AdaptiveAvgPool2d((8, 8))                   # (128, 8, 8)
         self.fc = nn.Sequential(
-            nn.Linear(128 * 8 * 8, 512),
+            nn.Linear(128 * 8 * 8, feature_dim),
             nn.ReLU(inplace=True),
         )
 
@@ -58,11 +58,11 @@ class ActorCriticCNN(nn.Module):
     evaluate() 返回：new_log_probs, values, entropy（用于 PPO update）
     """
 
-    def __init__(self):
+    def __init__(self, in_channels: int = 7, feature_dim: int = 512):
         super().__init__()
-        self.backbone = _CNNBackbone()
-        self.actor = nn.Linear(512, _NUM_ACTIONS)
-        self.critic = nn.Linear(512, 1)
+        self.backbone = _CNNBackbone(in_channels=in_channels, feature_dim=feature_dim)
+        self.actor = nn.Linear(feature_dim, _NUM_ACTIONS)
+        self.critic = nn.Linear(feature_dim, 1)
 
         # 权重初始化
         for m in self.modules():

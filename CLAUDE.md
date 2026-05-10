@@ -1,167 +1,123 @@
-# CLAUDE.md
+﻿# CLAUDE.md
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## 问题域
-
-50×50 栅格战场，8 方向移动。存在地形高度（影响可通行性）和二值可见性（敌人瞭望点有 FOV）。用 PPO 训练智能体从起点走到终点，最小化被敌人看到的暴露时间。
-
-## 项目结构
+## 闂鍩?
+50脳50 鏍呮牸鎴樺満锛? 鏂瑰悜绉诲姩銆傚瓨鍦ㄥ湴褰㈤珮搴︼紙褰卞搷鍙€氳鎬э級鍜屼簩鍊煎彲瑙佹€э紙鏁屼汉鐬湜鐐规湁 FOV锛夈€傜敤 PPO 璁粌鏅鸿兘浣撲粠璧风偣璧板埌缁堢偣锛屾渶灏忓寲琚晫浜虹湅鍒扮殑鏆撮湶鏃堕棿銆?
+## 椤圭洰缁撴瀯
 
 ```
-config.py               — EnvConfig 环境参数（frozen dataclass，一字不改）
-MyPath_Data417.txt      — 501×499 全地形数据，每格 (height,tag)，tag: 0=地面 1=建筑 2=树木
+config.py               鈥?EnvConfig 鐜鍙傛暟锛坒rozen dataclass锛屼竴瀛椾笉鏀癸級
+MyPath_Data417.txt      鈥?501脳499 鍏ㄥ湴褰㈡暟鎹紝姣忔牸 (height,tag)锛宼ag: 0=鍦伴潰 1=寤虹瓚 2=鏍戞湪
 
 env/
-  terrain_loader.py     — 地形文件解析
-  occlusion.py          — 3D 光线追踪遮挡判定（独立模块，无状态）
-  enemy_search.py       — 特征代理评分 + 空间抑制 → 8 个瞭望点 + 全图可见性底图
-  battlefield_env.py    — 场景生成 + 通行检查 + RL 接口（reset/step/get_obs/get_action_mask）
-  scene_pool.py         — 预计算随机障碍场景池（阶段1用，无敌人）
-  vectorized_env.py     — N 个并行环境包装器，批量前向传播加速
-
+  terrain_loader.py     鈥?鍦板舰鏂囦欢瑙ｆ瀽
+  occlusion.py          鈥?3D 鍏夌嚎杩借釜閬尅鍒ゅ畾锛堢嫭绔嬫ā鍧楋紝鏃犵姸鎬侊級
+  enemy_search.py       鈥?鐗瑰緛浠ｇ悊璇勫垎 + 绌洪棿鎶戝埗 鈫?8 涓灜鏈涚偣 + 鍏ㄥ浘鍙鎬у簳鍥?  battlefield_env.py    鈥?鍦烘櫙鐢熸垚 + 閫氳妫€鏌?+ RL 鎺ュ彛锛坮eset/step/get_obs/get_action_mask锛?  scene_pool.py         鈥?棰勮绠楅殢鏈洪殰纰嶅満鏅睜锛堥樁娈?鐢紝鏃犳晫浜猴級
+  vectorized_env.py     鈥?N 涓苟琛岀幆澧冨寘瑁呭櫒锛屾壒閲忓墠鍚戜紶鎾姞閫?
 models/
-  policy_network.py     — CNN backbone + Actor/Critic 双头 + Action Masking + 数据增强 + 动作逆变换
-
+  actor_critic_cnn.py     鈥?CNN backbone + Actor/Critic 鍙屽ご + Action Masking + 鏁版嵁澧炲己 + 鍔ㄤ綔閫嗗彉鎹?
 train/
-  ppo_config.py         — PPOConfig dataclass（独立于 EnvConfig）
-  ppo_buffer.py         — RolloutBuffer（存储 transitions + GAE 计算）
-  ppo_trainer.py        — PPO 训练循环（rollout → GAE → PPO update → eval）
-  train_ppo.py          — 全功能训练入口（全图模式 + 敌人）
-  smoke_test.py         — 平坦地形冒烟测试（无敌人无建筑，验证算法可行性）
-  stage1_obstacle.py    — 阶段1：障碍地形纯导航训练（无敌人）
-  stage1_parallel.py    — 阶段1并行版（多环境批量推理）
+  ppo_config.py         鈥?PPOConfig dataclass锛堢嫭绔嬩簬 EnvConfig锛?  ppo_buffer.py         鈥?RolloutBuffer锛堝瓨鍌?transitions + GAE 璁＄畻锛?  ppo_trainer.py        鈥?PPO 璁粌寰幆锛坮ollout 鈫?GAE 鈫?PPO update 鈫?eval锛?  train_ppo.py          鈥?鍏ㄥ姛鑳借缁冨叆鍙ｏ紙鍏ㄥ浘妯″紡 + 鏁屼汉锛?  smoke_test.py         鈥?骞冲潶鍦板舰鍐掔儫娴嬭瘯锛堟棤鏁屼汉鏃犲缓绛戯紝楠岃瘉绠楁硶鍙鎬э級
+  train_local_pool_ppo.py    鈥?闃舵1锛氶殰纰嶅湴褰㈢函瀵艰埅璁粌锛堟棤鏁屼汉锛?  train_local_pool_ppo.py    鈥?闃舵1骞惰鐗堬紙澶氱幆澧冩壒閲忔帹鐞嗭級
 
 artifacts/
-  enemy_pool.json       — 预计算的 8 个敌人瞭望点
-  visibility_maps.npz   — 预计算的 8 张全图可见性底图
-  scene_pool.npz        — 预计算的 N 个随机障碍场景（阶段1用）
+  enemy_pool.json       鈥?棰勮绠楃殑 8 涓晫浜虹灜鏈涚偣
+  visibility_maps.npz   鈥?棰勮绠楃殑 8 寮犲叏鍥惧彲瑙佹€у簳鍥?  scene_pool.npz        鈥?棰勮绠楃殑 N 涓殢鏈洪殰纰嶅満鏅紙闃舵1鐢級
 
 visualize/
-  visualizer.py         — 训练结果可视化
-  find_dense_scenes.py  — 查找密集障碍场景
+  visualizer.py         鈥?璁粌缁撴灉鍙鍖?  find_dense_scenes.py  鈥?鏌ユ壘瀵嗛泦闅滅鍦烘櫙
 ```
 
-## 各模块功能
+## 鍚勬ā鍧楀姛鑳?
+### `env/battlefield_env.py` 鈥?鍦烘櫙鐢熸垚涓庨€氳妫€鏌?
+**`BattlefieldEnv`** 绫伙紝鏋勯€犳椂鑷姩璋?`generate_scene()`銆?
+RL 鎺ュ彛锛?- `reset(seed)` 鈫?obs (7,50,50) float32
+- `step(action: int)` 鈫?(obs, reward, done, info)
+- `get_action_mask()` 鈫?(8,) bool锛孴rue=鍙墽琛?- `_get_observation()` 鈫?(7,50,50) 7閫氶亾锛歨eight + ground/building/tree + visibility + agent/goal one-hot 缂栫爜
+- `compute_bfs_path()` 鈫?list[tuple] 鎴?None
 
-### `env/battlefield_env.py` — 场景生成与通行检查
+鍦烘櫙妯″紡锛歚"full_map"`锛堝叏鍥炬粦鍔ㄧ獥鍙ｏ級銆乣"random"`锛堢▼搴忓寲鍦板舰锛夈€乣"fixed"`锛堝浐瀹氶殰纰嶇墿锛夈€?
+閫氳妫€鏌ワ細`_is_blocked` 缁煎悎鍒ゆ柇杈圭晫/鏍囩/鐖潯(tan鈮?.3)/鏁屼汉浣嶇疆銆?
+### `env/occlusion.py` 鈥?閬尅鍒ゅ畾锛堢嫭绔嬫ā鍧楋紝鏃犵姸鎬侊級
 
-**`BattlefieldEnv`** 类，构造时自动调 `generate_scene()`。
+- `is_occluded(start, end, height_map, config)` 鈫?bool: 3D 鍏夌嚎杩借釜銆?*start/end 蹇呴』涓?height_map 鍚屽潗鏍囩郴**
+- `compute_cell_visibility(observer, cell, height_map, config)` 鈫?float
+- `compute_visibility_map(observer, terrain, config)` 鈫?(vis_map, visible_count)
 
-RL 接口：
-- `reset(seed)` → obs (7,50,50) float32
-- `step(action: int)` → (obs, reward, done, info)
-- `get_action_mask()` → (8,) bool，True=可执行
-- `_get_observation()` → (7,50,50) 7通道：height + ground/building/tree + visibility + agent/goal one-hot 编码
-- `compute_bfs_path()` → list[tuple] 或 None
+### `env/enemy_search.py` 鈥?鏁屼汉鐬湜鐐规悳绱?
+- `compute_feature_scores(terrain)` 鈫?np.ndarray: 鐗瑰緛浠ｇ悊璇勫垎锛堥珮搴︽帓鍚?.3 + 寮€闃斿害0.3 + 鏀厤鍔?.4锛?- `spatial_suppression(scores, k, radius)` 鈫?list[tuple]: NMS 绌洪棿鎶戝埗
 
-场景模式：`"full_map"`（全图滑动窗口）、`"random"`（程序化地形）、`"fixed"`（固定障碍物）。
+### `models/actor_critic_cnn.py` 鈥?CNN 绛栫暐-浠峰€肩綉缁?
+**`ActorCriticCNN`**锛?- CNN backbone: Conv(7鈫?2,k5,s2) 鈫?Conv(32鈫?4,k3,s2) 鈫?Conv(64鈫?4,k3,s1) 鈫?Conv(64鈫?28,k3,s1) 鈫?AdaptiveAvgPool(8,8) 鈫?FC(8192鈫?12)
+- Actor: Linear(512鈫?), Critic: Linear(512鈫?)
+- `forward(obs, action_mask, deterministic)` 鈫?(action, log_prob, value, entropy, logits)
+- `evaluate(obs, action, action_mask)` 鈫?(log_probs, values, entropy) 鈥?PPO update 鐢?- `get_value(obs)` 鈫?value 鈥?GAE bootstrap 鐢?- Action masking: 鏃犳晥鍔ㄤ綔 logit = -1e9锛堥潪 -inf锛岄伩鍏?softmax NaN锛?
+**鏁版嵁澧炲己** (`random_augment`)锛?- 闅忔満鏃嬭浆锛?/90/180/270锛? 姘村钩/鍨傜洿缈昏浆锛堝悇50%锛?- 杩斿洖 `(aug_obs, aug_mask, (k, flip_h, flip_v))`
+- **鍏抽敭**锛氬寮哄湪 rollout 鏃舵柦鍔犱竴娆★紝buffer 瀛樺偍澧炲己鍚庢暟鎹€侾PO update 鏃跺師鏍峰彇鍑猴紝淇濊瘉 old/new log_prob 鍙瘮銆?
+**鍔ㄤ綔閫嗗彉鎹?* (`deaugment_action(aug_action, k, flip_h, flip_v)`)锛?- **蹇呴』璋冪敤锛?* 澧炲己绌洪棿鐨勫姩浣滅储寮曞繀椤诲厛閫嗗彉鎹㈠洖鍘熷绌洪棿锛屽啀浜ょ粰 `env.step()`銆?- 閫嗗簭锛氶€?flip_v 鈫?閫?flip_h 鈫?閫嗘棆杞?k 娆?forward 鏄犲皠)
 
-通行检查：`_is_blocked` 综合判断边界/标签/爬坡(tan≤0.3)/敌人位置。
+### `train/ppo_buffer.py` 鈥?Rollout Buffer
 
-### `env/occlusion.py` — 遮挡判定（独立模块，无状态）
+棰勫垎閰嶆墍鏈?tensor锛宍add()` 閫愭潯瀛樺偍 transition銆?
+GAE 璁＄畻鏈変袱绉嶆ā寮忥細
+- `compute_gae(last_value, gamma, gae_lambda)`: 鍗曠幆澧冧覆琛岀増锛屽€掑簭閬嶅巻涓€鏉¤繛缁建杩?- `compute_gae_parallel(last_values, gamma, gae_lambda, num_envs)`: **骞惰鐗?*锛屾暟鎹寜 `[e0_t0, e1_t0, ..., eN_t0, e0_t1, ...]` 浜ょ粐瀛樺偍锛屾寜 `stride=num_envs` 鐙珛璁＄畻鍚勭幆澧冪殑 GAE
 
-- `is_occluded(start, end, height_map, config)` → bool: 3D 光线追踪。**start/end 必须与 height_map 同坐标系**
-- `compute_cell_visibility(observer, cell, height_map, config)` → float
-- `compute_visibility_map(observer, terrain, config)` → (vis_map, visible_count)
+`normalize_advantages()` 鍋?z-score 鏍囧噯鍖栵紝`sample()` 杩斿洖闅忔満 mini-batch 绱㈠紩銆?
+### `train/ppo_trainer.py` 鈥?PPO 璁粌鍣?
+**`PPOTrainer`**锛氬畬鏁磋缁冨惊鐜€?- 杩涘害濂栧姳琛板噺锛氳缁冭繘搴?50%-90% 鏈熼棿 `progress_weight` 绾挎€ц“鍑忓埌 0
+- 璇勪及锛氱‘瀹氭€ф帹鐞嗭紙鏃犲寮恒€乤rgmax锛夛紝姣?`eval_interval` 姝ヤ竴娆?
+### `env/vectorized_env.py` 鈥?骞惰鐜
 
-### `env/enemy_search.py` — 敌人瞭望点搜索
+**`VectorizedEnv`**锛歂 涓嫭绔?`BattlefieldEnv` 瀹炰緥锛屾瘡涓粠鍦烘櫙姹犵嫭绔嬮噰鏍枫€?- `get_observations()` 鈫?(N,7,50,50)
+- `step(actions)` 鈫?瀵规墍鏈夌幆澧冨悇鎵ц涓€姝ワ紝鑷姩 reset 宸插畬鎴愮殑
+- `_reset_env()` 灏?`scenario_mode` 璁句负 `"full_map"`锛岃繖鏄湁鎰忎负涔嬧€斺€旇烦杩?`_is_blocked` 涓殑鏁屼汉浣嶇疆妫€鏌ワ紙闃舵1鏃犳晫浜猴級
+- 閰嶅悎鎵归噺 CNN 鍓嶅悜浼犳挱锛屽姞閫熺害 N 鍊?- **娉ㄦ剰**锛氳瘎浼板嚱鏁颁細淇敼 env 0 鐨勫唴閮ㄧ姸鎬侊紙`_reset_env` 鎹㈠満鏅級锛岃瘎浼板悗蹇呴』鍒锋柊 `obs_batch`锛屽惁鍒欎笅涓€姝ヨ缁冧細鐢ㄥ埌杩囨湡瑙傛祴
 
-- `compute_feature_scores(terrain)` → np.ndarray: 特征代理评分（高度排名0.3 + 开阔度0.3 + 支配力0.4）
-- `spatial_suppression(scores, k, radius)` → list[tuple]: NMS 空间抑制
+## 璁粌闃舵浣撶郴
 
-### `models/policy_network.py` — CNN 策略-价值网络
-
-**`ActorCriticCNN`**：
-- CNN backbone: Conv(7→32,k5,s2) → Conv(32→64,k3,s2) → Conv(64→64,k3,s1) → Conv(64→128,k3,s1) → AdaptiveAvgPool(8,8) → FC(8192→512)
-- Actor: Linear(512→8), Critic: Linear(512→1)
-- `forward(obs, action_mask, deterministic)` → (action, log_prob, value, entropy, logits)
-- `evaluate(obs, action, action_mask)` → (log_probs, values, entropy) — PPO update 用
-- `get_value(obs)` → value — GAE bootstrap 用
-- Action masking: 无效动作 logit = -1e9（非 -inf，避免 softmax NaN）
-
-**数据增强** (`random_augment`)：
-- 随机旋转（0/90/180/270）+ 水平/垂直翻转（各50%）
-- 返回 `(aug_obs, aug_mask, (k, flip_h, flip_v))`
-- **关键**：增强在 rollout 时施加一次，buffer 存储增强后数据。PPO update 时原样取出，保证 old/new log_prob 可比。
-
-**动作逆变换** (`deaugment_action(aug_action, k, flip_h, flip_v)`)：
-- **必须调用！** 增强空间的动作索引必须先逆变换回原始空间，再交给 `env.step()`。
-- 逆序：逆 flip_v → 逆 flip_h → 逆旋转(k 次 forward 映射)
-
-### `train/ppo_buffer.py` — Rollout Buffer
-
-预分配所有 tensor，`add()` 逐条存储 transition。
-
-GAE 计算有两种模式：
-- `compute_gae(last_value, gamma, gae_lambda)`: 单环境串行版，倒序遍历一条连续轨迹
-- `compute_gae_parallel(last_values, gamma, gae_lambda, num_envs)`: **并行版**，数据按 `[e0_t0, e1_t0, ..., eN_t0, e0_t1, ...]` 交织存储，按 `stride=num_envs` 独立计算各环境的 GAE
-
-`normalize_advantages()` 做 z-score 标准化，`sample()` 返回随机 mini-batch 索引。
-
-### `train/ppo_trainer.py` — PPO 训练器
-
-**`PPOTrainer`**：完整训练循环。
-- 进度奖励衰减：训练进度 50%-90% 期间 `progress_weight` 线性衰减到 0
-- 评估：确定性推理（无增强、argmax），每 `eval_interval` 步一次
-
-### `env/vectorized_env.py` — 并行环境
-
-**`VectorizedEnv`**：N 个独立 `BattlefieldEnv` 实例，每个从场景池独立采样。
-- `get_observations()` → (N,7,50,50)
-- `step(actions)` → 对所有环境各执行一步，自动 reset 已完成的
-- `_reset_env()` 将 `scenario_mode` 设为 `"full_map"`，这是有意为之——跳过 `_is_blocked` 中的敌人位置检查（阶段1无敌人）
-- 配合批量 CNN 前向传播，加速约 N 倍
-- **注意**：评估函数会修改 env 0 的内部状态（`_reset_env` 换场景），评估后必须刷新 `obs_batch`，否则下一步训练会用到过期观测
-
-## 训练阶段体系
-
-| 阶段 | 脚本 | 场景 | 敌人 | 目的 |
+| 闃舵 | 鑴氭湰 | 鍦烘櫙 | 鏁屼汉 | 鐩殑 |
 |------|------|------|------|------|
-| 冒烟 | `train/smoke_test.py` | 平坦地形(0,0)→(49,49) | 无 | 验证算法可行性 |
-| 阶段1 | `train/stage1_parallel.py` | 场景池（建筑+树木+高度） | 无 | 验证 action masking + 绕行 |
-| 阶段2 | `train/train_ppo.py` | 全图滑动窗口 | 有 | 完整隐蔽寻路 |
+| 鍐掔儫 | `train/smoke_test.py` | 骞冲潶鍦板舰(0,0)鈫?49,49) | 鏃?| 楠岃瘉绠楁硶鍙鎬?|
+| 闃舵1 | `train/train_local_pool_ppo.py` | 鍦烘櫙姹狅紙寤虹瓚+鏍戞湪+楂樺害锛?| 鏃?| 楠岃瘉 action masking + 缁曡 |
+| 闃舵2 | `train/train_ppo.py` | 鍏ㄥ浘婊戝姩绐楀彛 | 鏈?| 瀹屾暣闅愯斀瀵昏矾 |
 
-## 常用命令
+## 甯哥敤鍛戒护
 
 ```bash
-# 生成场景池（阶段1用，一次性）
+# 鐢熸垚鍦烘櫙姹狅紙闃舵1鐢紝涓€娆℃€э級
 python -m env.scene_pool --num 5000
 
-# 阶段1训练（并行版，推荐）
-python -m train.stage1_parallel --steps 500000 --envs 8 --pool artifacts/scene_pool.npz
+# 闃舵1璁粌锛堝苟琛岀増锛屾帹鑽愶級
+python -m train.train_local_pool_ppo --steps 500000 --envs 8 --pool artifacts/scene_pool.npz
 
-# 阶段1训练（串行版，调试用）
-python -m train.stage1_obstacle --steps 500000 --pool artifacts/scene_pool.npz
+# 闃舵1璁粌锛堜覆琛岀増锛岃皟璇曠敤锛?python -m train.train_local_pool_ppo --steps 500000 --pool artifacts/scene_pool.npz
 
-# 全功能训练（全图模式 + 敌人）
-python -m train.train_ppo --steps 2000000 --save checkpoints
+# 鍏ㄥ姛鑳借缁冿紙鍏ㄥ浘妯″紡 + 鏁屼汉锛?python -m train.train_fullmap_ppo --steps 2000000 --save checkpoints
 
-# 冒烟测试（平坦地形快速验证）
+# 鍐掔儫娴嬭瘯锛堝钩鍧﹀湴褰㈠揩閫熼獙璇侊級
 python -m train.smoke_test
 
-# 重新生成敌人池 + 可见性底图
-python -m env.enemy_search
+# 閲嶆柊鐢熸垚鏁屼汉姹?+ 鍙鎬у簳鍥?python -m env.enemy_search
 
-# 快速导入验证
-python -c "from models import ActorCriticCNN, random_augment, deaugment_action; from train import PPOConfig, RolloutBuffer, PPOTrainer; print('OK')"
+# 蹇€熷鍏ラ獙璇?python -c "from models import ActorCriticCNN, random_augment, deaugment_action; from train import PPOConfig, RolloutBuffer, PPOTrainer; print('OK')"
 ```
 
-## 坐标系统约定
+## 鍧愭爣绯荤粺绾﹀畾
 
-- 全局坐标: 在全地形 `height_map` (501×499) 上的坐标
-- 窗口坐标: 在 50×50 滑动窗口内的坐标
-- `occlusion.py` 中所有函数使用同一坐标系（start/end 与 height_map 对应）
-- `BattlefieldEnv._is_occluded_global` 负责窗口→全局坐标转换
+- 鍏ㄥ眬鍧愭爣: 鍦ㄥ叏鍦板舰 `height_map` (501脳499) 涓婄殑鍧愭爣
+- 绐楀彛鍧愭爣: 鍦?50脳50 婊戝姩绐楀彛鍐呯殑鍧愭爣
+- `occlusion.py` 涓墍鏈夊嚱鏁颁娇鐢ㄥ悓涓€鍧愭爣绯伙紙start/end 涓?height_map 瀵瑰簲锛?- `BattlefieldEnv._is_occluded_global` 璐熻矗绐楀彛鈫掑叏灞€鍧愭爣杞崲
 
-## 关键实现细节
+## 鍏抽敭瀹炵幇缁嗚妭
 
-- **Action Masking**: 用 `-1e9` 而非 `-inf`，避免全 mask 时 softmax NaN
-- **数据增强时机**: 仅在 rollout 时施加一次，buffer 存增强后数据，PPO update 不重新增强
-- **动作逆变换**: `random_augment` 变换了 obs 和 mask，CNN 输出增强空间动作，必须 `deaugment_action()` 还原后再 `env.step()`
-- **GAE bootstrap**: 用 rollout 最后一步的 obs 计算 `last_value`，done=True 时 `not_done` 因子自动归零
-- **进度奖励衰减**: `progress_weight` 在训练进度 50%-90% 期间线性衰减到 0（课程学习）
-- **超时惩罚硬编码**: `step()` 中超时惩罚写死 `-5.0`，而非使用 `config.timeout_penalty`（50.0）。轻超时惩罚避免价值网络震荡，失败主要通过累积步数惩罚体现
-- **EnvConfig 不可修改**: 所有训练超参在 `PPOConfig` 中配置
-- **并行 GAE 交织存储**: buffer 按 `[e0_t0, e1_t0, ..., eN_t0, e0_t1, ...]` 顺序存储，`compute_gae_parallel` 按 `t = env_idx + step * num_envs` 跨步长访问，确保各 env 的 GAE 独立计算而不串扰
-- **评估后刷新观测**: `_evaluate_vec` 会 reset env 0 换场景，评估后必须 `vec_env.get_observations()` 刷新 `obs_batch`，否则下一步训练用过期数据
+- **Action Masking**: 鐢?`-1e9` 鑰岄潪 `-inf`锛岄伩鍏嶅叏 mask 鏃?softmax NaN
+- **鏁版嵁澧炲己鏃舵満**: 浠呭湪 rollout 鏃舵柦鍔犱竴娆★紝buffer 瀛樺寮哄悗鏁版嵁锛孭PO update 涓嶉噸鏂板寮?- **鍔ㄤ綔閫嗗彉鎹?*: `random_augment` 鍙樻崲浜?obs 鍜?mask锛孋NN 杈撳嚭澧炲己绌洪棿鍔ㄤ綔锛屽繀椤?`deaugment_action()` 杩樺師鍚庡啀 `env.step()`
+- **GAE bootstrap**: 鐢?rollout 鏈€鍚庝竴姝ョ殑 obs 璁＄畻 `last_value`锛宒one=True 鏃?`not_done` 鍥犲瓙鑷姩褰掗浂
+- **杩涘害濂栧姳琛板噺**: `progress_weight` 鍦ㄨ缁冭繘搴?50%-90% 鏈熼棿绾挎€ц“鍑忓埌 0锛堣绋嬪涔狅級
+- **瓒呮椂鎯╃綒纭紪鐮?*: `step()` 涓秴鏃舵儵缃氬啓姝?`-5.0`锛岃€岄潪浣跨敤 `config.timeout_penalty`锛?0.0锛夈€傝交瓒呮椂鎯╃綒閬垮厤浠峰€肩綉缁滈渿鑽★紝澶辫触涓昏閫氳繃绱Н姝ユ暟鎯╃綒浣撶幇
+- **EnvConfig 涓嶅彲淇敼**: 鎵€鏈夎缁冭秴鍙傚湪 `PPOConfig` 涓厤缃?- **骞惰 GAE 浜ょ粐瀛樺偍**: buffer 鎸?`[e0_t0, e1_t0, ..., eN_t0, e0_t1, ...]` 椤哄簭瀛樺偍锛宍compute_gae_parallel` 鎸?`t = env_idx + step * num_envs` 璺ㄦ闀胯闂紝纭繚鍚?env 鐨?GAE 鐙珛璁＄畻鑰屼笉涓叉壈
+- **璇勪及鍚庡埛鏂拌娴?*: `_evaluate_vec` 浼?reset env 0 鎹㈠満鏅紝璇勪及鍚庡繀椤?`vec_env.get_observations()` 鍒锋柊 `obs_batch`锛屽惁鍒欎笅涓€姝ヨ缁冪敤杩囨湡鏁版嵁
+
+
+
