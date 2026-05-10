@@ -319,6 +319,8 @@ def main() -> None:
                 save_path / f"policy_{global_step}.pt",
             )
             next_eval_at += ppo_cfg.eval_interval
+            # 评估修改了 env 0 的状态，刷新观测以避免下一步训练用过期数据
+            obs_batch = vec_env.get_observations()
 
     # —— 最终保存 ——
     torch.save(policy.state_dict(), save_path / "policy_final.pt")

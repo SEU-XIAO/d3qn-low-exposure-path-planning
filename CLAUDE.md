@@ -52,7 +52,7 @@ RL 接口：
 - `reset(seed)` → obs (7,50,50) float32
 - `step(action: int)` → (obs, reward, done, info)
 - `get_action_mask()` → (8,) bool，True=可执行
-- `_get_observation()` → (7,50,50) 7通道：height + ground/building/tree + visibility + agent/goal 高斯斑(σ=2)
+- `_get_observation()` → (7,50,50) 7通道：height + ground/building/tree + visibility + agent/goal one-hot 编码
 - `compute_bfs_path()` → list[tuple] 或 None
 
 场景模式：`"full_map"`（全图滑动窗口）、`"random"`（程序化地形）、`"fixed"`（固定障碍物）。
@@ -91,7 +91,13 @@ RL 接口：
 
 ### `train/ppo_buffer.py` — Rollout Buffer
 
-预分配所有 tensor，`add()` 逐条存储 transition，`compute_gae()` 倒序计算 GAE advantage，`normalize_advantages()` 做 z-score 标准化，`sample()` 返回随机 mini-batch 索引。
+预分配所有 tensor，`add()` 逐条存储 transition。
+
+GAE 计算有两种模式：
+- `compute_gae(last_value, gamma, gae_lambda)`: 单环境串行版，倒序遍历一条连续轨迹
+- `compute_gae_parallel(last_values, gamma, gae_lambda, num_envs)`: **并行版**，数据按 `[e0_t0, e1_t0, ..., eN_t0, e0_t1, ...]` 交织存储，按 `stride=num_envs` 独立计算各环境的 GAE
+
+`normalize_advantages()` 做 z-score 标准化，`sample()` 返回随机 mini-batch 索引。
 
 ### `train/ppo_trainer.py` — PPO 训练器
 
@@ -104,7 +110,9 @@ RL 接口：
 **`VectorizedEnv`**：N 个独立 `BattlefieldEnv` 实例，每个从场景池独立采样。
 - `get_observations()` → (N,7,50,50)
 - `step(actions)` → 对所有环境各执行一步，自动 reset 已完成的
+- `_reset_env()` 将 `scenario_mode` 设为 `"full_map"`，这是有意为之——跳过 `_is_blocked` 中的敌人位置检查（阶段1无敌人）
 - 配合批量 CNN 前向传播，加速约 N 倍
+- **注意**：评估函数会修改 env 0 的内部状态（`_reset_env` 换场景），评估后必须刷新 `obs_batch`，否则下一步训练会用到过期观测
 
 ## 训练阶段体系
 
@@ -153,4 +161,7 @@ python -c "from models import ActorCriticCNN, random_augment, deaugment_action; 
 - **动作逆变换**: `random_augment` 变换了 obs 和 mask，CNN 输出增强空间动作，必须 `deaugment_action()` 还原后再 `env.step()`
 - **GAE bootstrap**: 用 rollout 最后一步的 obs 计算 `last_value`，done=True 时 `not_done` 因子自动归零
 - **进度奖励衰减**: `progress_weight` 在训练进度 50%-90% 期间线性衰减到 0（课程学习）
+- **超时惩罚硬编码**: `step()` 中超时惩罚写死 `-5.0`，而非使用 `config.timeout_penalty`（50.0）。轻超时惩罚避免价值网络震荡，失败主要通过累积步数惩罚体现
 - **EnvConfig 不可修改**: 所有训练超参在 `PPOConfig` 中配置
+- **并行 GAE 交织存储**: buffer 按 `[e0_t0, e1_t0, ..., eN_t0, e0_t1, ...]` 顺序存储，`compute_gae_parallel` 按 `t = env_idx + step * num_envs` 跨步长访问，确保各 env 的 GAE 独立计算而不串扰
+- **评估后刷新观测**: `_evaluate_vec` 会 reset env 0 换场景，评估后必须 `vec_env.get_observations()` 刷新 `obs_batch`，否则下一步训练用过期数据

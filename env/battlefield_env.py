@@ -355,16 +355,13 @@ class BattlefieldEnv:
 
         ch_vis = self.visibility_map.astype(np.float32)
 
-        sigma = 2.0
-        ys, xs = np.meshgrid(np.arange(H), np.arange(W), indexing="ij")
-        xs = xs.astype(np.float32)
-        ys = ys.astype(np.float32)
+        ax, ay = int(self.agent_position[0]), int(self.agent_position[1])
+        ch_agent = np.zeros((H, W), dtype=np.float32)
+        ch_agent[ax, ay] = 1.0
 
-        ax, ay = float(self.agent_position[0]), float(self.agent_position[1])
-        ch_agent = np.exp(-((xs - ax) ** 2 + (ys - ay) ** 2) / (2 * sigma ** 2))
-
-        gx, gy = float(self.goal_position[0]), float(self.goal_position[1])
-        ch_goal = np.exp(-((xs - gx) ** 2 + (ys - gy) ** 2) / (2 * sigma ** 2))
+        gx, gy = int(self.goal_position[0]), int(self.goal_position[1])
+        ch_goal = np.zeros((H, W), dtype=np.float32)
+        ch_goal[gx, gy] = 1.0
 
         obs = np.stack([ch_height, ch_ground, ch_building, ch_tree, ch_vis, ch_agent, ch_goal], axis=0)
         return obs.astype(np.float32)
