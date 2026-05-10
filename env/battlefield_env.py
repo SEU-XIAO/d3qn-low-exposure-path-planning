@@ -1,23 +1,21 @@
+"""战场场景生成与通行检查模块。
+
+负责：地形加载、窗口采样、起点/终点/敌人选取、场景生成、
+通行性验证（攀爬约束 + 标签约束）、可见性计算（委托给 occlusion 模块）。
+"""
+
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import dataclass
-from math import sqrt
 import json
+from math import sqrt
 from pathlib import Path
 
 import numpy as np
 
 from config import EnvConfig
 from env.terrain_loader import FullTerrain, load_terrain
-
-
-@dataclass(frozen=True)
-class StepResult:
-    observation: dict[str, np.ndarray]
-    reward: float
-    done: bool
-    info: dict[str, float | bool]
+from env.occlusion import is_occluded
 
 
 class BattlefieldEnv:
@@ -46,31 +44,24 @@ class BattlefieldEnv:
         self.visibility_map = np.zeros((self.grid_size, self.grid_size), dtype=np.float32)
         self.cover_map = np.ones((self.grid_size, self.grid_size), dtype=np.float32)
 
-        self.steps = 0
-        self.consecutive_collisions = 0
-        self.total_path_length = 0.0
-        self.visible_path_length = 0.0
-        self.hidden_path_length = 0.0
         self.current_scene_seed: int | None = None
         self.current_scenario_mode = self.config.scenario_mode
-
-        # ---- 航点/子目标状态 ----
-        self.current_subgoal: np.ndarray | None = None
-        self.subgoal_is_active: bool = False
+        self.steps = 0
+        self.consecutive_collisions = 0
+        self.total_collisions = 0
+        self.current_progress_weight = self.config.progress_weight
 
         # ---- 全图模式状态 ----
         self.full_terrain: FullTerrain | None = None
-        self.enemy_pool: list[tuple[int, int]] = []  # 全局坐标的敌人候选位置列表
-        self.full_visibility_maps: list[np.ndarray] = []  # 预计算的 8 张全图可见性底图
-        self.window_offset: tuple[int, int] = (0, 0)  # 窗口在全局图中的左上角偏移
-        self.window_tag_map: np.ndarray | None = None  # 当前窗口的 tag 图
-        self._enemy_episode_counter: int = 0  # 敌人切换计数器
-        self._current_enemy_idx: int = 0  # 当前使用的敌人池索引
+        self.enemy_pool: list[tuple[int, int]] = []
+        self.full_visibility_maps: list[np.ndarray] = []
+        self.window_offset: tuple[int, int] = (0, 0)
+        self.window_tag_map: np.ndarray | None = None
 
         if self.config.full_map_path:
             self._init_full_map_mode()
 
-        self.reset()
+        self.generate_scene()
 
     # ============================================================
     #  全图模式初始化
@@ -80,7 +71,6 @@ class BattlefieldEnv:
         self.full_terrain = load_terrain(self.config.full_map_path)
         self.height_levels = int(self.full_terrain.height_map.max())
 
-        # 加载敌人池 JSON
         pool_path = self.config.enemy_pool_path
         if pool_path and Path(pool_path).exists():
             with open(pool_path, "r", encoding="utf-8") as f:
@@ -89,7 +79,6 @@ class BattlefieldEnv:
         else:
             self.enemy_pool = []
 
-        # 加载预计算可见性底图 NPZ
         vis_npz = Path(pool_path).parent / "visibility_maps.npz" if pool_path else None
         if vis_npz and vis_npz.exists():
             loaded = np.load(vis_npz)
@@ -99,18 +88,15 @@ class BattlefieldEnv:
             self.full_visibility_maps = []
 
     # ============================================================
-    #  reset / step / observation
+    #  场景生成（公开入口）
     # ============================================================
 
-    def reset(self, scene_seed: int | None = None, scenario_mode: str | None = None) -> dict[str, np.ndarray]:
-        self.steps = 0
-        self.consecutive_collisions = 0
-        self.total_path_length = 0.0
-        self.visible_path_length = 0.0
-        self.hidden_path_length = 0.0
-        self.current_subgoal = None
-        self.subgoal_is_active = False
-
+    def generate_scene(
+        self,
+        scene_seed: int | None = None,
+        scenario_mode: str | None = None,
+        window_offset: tuple[int, int] | None = None,
+    ) -> None:
         if scenario_mode is not None:
             self.current_scenario_mode = scenario_mode
         else:
@@ -118,7 +104,7 @@ class BattlefieldEnv:
 
         if self.current_scenario_mode == "full_map":
             self.current_scene_seed = scene_seed if scene_seed is not None else int(np.random.randint(0, 10_000_000))
-            self._generate_full_map_scene(self.current_scene_seed)
+            self._generate_full_map_scene(self.current_scene_seed, window_offset=window_offset)
         elif self.current_scenario_mode == "random":
             self.current_scene_seed = scene_seed if scene_seed is not None else int(np.random.randint(0, 10_000_000))
             self._generate_random_scene(self.current_scene_seed)
@@ -127,120 +113,23 @@ class BattlefieldEnv:
             self._build_fixed_scene()
 
         self.agent_position = self.start_position.copy()
-        return self.get_observation()
-
-    def step(self, action: int) -> StepResult:
-        self.steps += 1
-        move = np.array(self.ACTIONS[action], dtype=np.int32)
-        candidate = self.agent_position + move
-        move_cost = self._move_cost(move)
-        reward = -self.config.step_penalty * move_cost
-        done = False
-        collision = False
-
-        waypoint_reached = False
-        if self._is_blocked(candidate):
-            reward -= self.config.collision_penalty
-            collision = True
-            self.consecutive_collisions += 1
-        else:
-            # 航点模式下用 subgoal 计算距离进度，否则用最终目标
-            dist_target = self.current_subgoal if self.current_subgoal is not None else self.goal_position
-            prev_dist = float(np.linalg.norm(dist_target.astype(np.float32) - self.agent_position.astype(np.float32)))
-            self.agent_position = candidate
-            self.consecutive_collisions = 0
-            current_visibility = float(self.visibility_map[tuple(self.agent_position)])
-            self.total_path_length += move_cost
-            self.visible_path_length += move_cost * current_visibility
-            self.hidden_path_length += move_cost * (1.0 - current_visibility)
-            reward -= self.config.visible_penalty * move_cost * current_visibility
-            cur_dist = float(np.linalg.norm(dist_target.astype(np.float32) - self.agent_position.astype(np.float32)))
-            reward += (prev_dist - cur_dist) * self.config.progress_weight
-
-            # 航点到达检测
-            if self.current_subgoal is not None and np.array_equal(self.agent_position, self.current_subgoal):
-                waypoint_reached = True
-                if self.subgoal_is_active:
-                    reward += self.config.waypoint_reached_reward
-
-        current_hidden_ratio = self.hidden_ratio
-
-        success = np.array_equal(self.agent_position, self.goal_position)
-        if success:
-            reward += self.config.goal_reward
-            reward += self.config.success_hidden_ratio_weight * current_hidden_ratio
-            done = True
-
-        if self.consecutive_collisions >= self.config.max_consecutive_collisions:
-            reward -= self.config.timeout_penalty
-            done = True
-
-        if self.steps >= self.config.max_steps:
-            if not success:
-                remaining_dist = self._goal_distance(self.agent_position) / self.grid_size
-                reward -= self.config.timeout_penalty * (1.0 + remaining_dist)
-            done = True
-
-        current_visibility = float(self.visibility_map[tuple(self.agent_position)])
-        return StepResult(
-            observation=self.get_observation(),
-            reward=reward,
-            done=done,
-            info={
-                "collision": collision,
-                "visibility": current_visibility,
-                "hidden_ratio": current_hidden_ratio,
-                "path_length": self.total_path_length,
-                "success": success,
-                "waypoint_reached": waypoint_reached,
-            },
-        )
-
-    @property
-    def hidden_ratio(self) -> float:
-        if self.total_path_length <= 1e-6:
-            return 1.0
-        return float(self.hidden_path_length / self.total_path_length)
-
-    @property
-    def visible_ratio(self) -> float:
-        if self.total_path_length <= 1e-6:
-            return 0.0
-        return float(self.visible_path_length / self.total_path_length)
-
-    def set_subgoal(self, position: tuple[int, int], is_final: bool = False) -> None:
-        """设置当前导航子目标（航点或最终目标）。"""
-        self.current_subgoal = np.array(position, dtype=np.int32)
-        self.subgoal_is_active = not is_final
-
-    def clear_subgoal(self) -> None:
-        """清除当前子目标。"""
-        self.current_subgoal = None
-        self.subgoal_is_active = False
-
-    def get_observation(self) -> dict[str, np.ndarray]:
-        return {
-            "local_map": self._extract_local_map(),
-            "global_features": self._build_global_features(),
-        }
 
     # ============================================================
     #  全图窗口场景生成
     # ============================================================
 
-    def _generate_full_map_scene(self, scene_seed: int) -> None:
+    def _generate_full_map_scene(
+        self, scene_seed: int, window_offset: tuple[int, int] | None = None,
+    ) -> None:
         rng = np.random.default_rng(scene_seed)
         ft = self.full_terrain
         if ft is None:
             raise RuntimeError("full_terrain 未加载")
 
-        # 从池中选敌人（全局坐标），每 N 个 episode 切换一次
         if not self.enemy_pool:
             raise RuntimeError("敌人池为空，请先运行 enemy_search.py 生成")
-        if self._enemy_episode_counter % self.config.enemy_switch_interval == 0:
-            self._current_enemy_idx = int(rng.integers(0, len(self.enemy_pool)))
-        self._enemy_episode_counter += 1
-        enemy_idx = self._current_enemy_idx
+
+        enemy_idx = int(rng.integers(0, len(self.enemy_pool)))
         enemy_global = self.enemy_pool[enemy_idx]
         self.enemy_position = np.array(
             (enemy_global[0], enemy_global[1], float(ft.height_map[enemy_global])),
@@ -248,7 +137,6 @@ class BattlefieldEnv:
         )
         self.enemy_pose_source = "pool"
 
-        # 选定当前敌人对应的全图可见性底图（预计算好的）
         current_full_vis = (
             self.full_visibility_maps[enemy_idx]
             if enemy_idx < len(self.full_visibility_maps)
@@ -258,10 +146,20 @@ class BattlefieldEnv:
         max_ox = ft.full_width - self.grid_size
         max_oy = ft.full_height - self.grid_size
 
-        for _ in range(256):
-            ox = int(rng.integers(0, max_ox + 1))
-            oy = int(rng.integers(0, max_oy + 1))
+        # 指定窗口偏移量时跳过随机搜索
+        offsets_to_try: list[tuple[int, int]]
+        if window_offset is not None:
+            ox, oy = window_offset
+            if not (0 <= ox <= max_ox and 0 <= oy <= max_oy):
+                raise ValueError(f"window_offset {window_offset} 超出范围 "
+                                 f"[0,{max_ox}] × [0,{max_oy}]")
+            offsets_to_try = [(ox, oy)]
+        else:
+            offsets_to_try = [(int(rng.integers(0, max_ox + 1)),
+                               int(rng.integers(0, max_oy + 1)))
+                              for _ in range(256)]
 
+        for ox, oy in offsets_to_try:
             self.window_offset = (ox, oy)
             self.height_map = ft.height_map[oy:oy + self.grid_size, ox:ox + self.grid_size].copy()
             self.window_tag_map = ft.tag_map[oy:oy + self.grid_size, ox:ox + self.grid_size].copy()
@@ -277,7 +175,6 @@ class BattlefieldEnv:
             if not self._has_feasible_path_window():
                 continue
 
-            # 从预计算底图切片得到可见性（无需射线计算）
             if current_full_vis is not None:
                 self.visibility_map = current_full_vis[oy:oy + self.grid_size, ox:ox + self.grid_size].astype(np.float32)
                 self.cover_map = 1.0 - self.visibility_map
@@ -290,7 +187,8 @@ class BattlefieldEnv:
         raise RuntimeError(f"无法为 scene_seed={scene_seed} 生成可达窗口场景")
 
     def _sample_start_goal_in_window(self, rng: np.random.Generator) -> tuple[tuple[int, int], tuple[int, int]]:
-        corner_span = 5
+        # 这里后续考虑把这个corner_span解耦到config当中进行配置
+        corner_span = 15
         start_pool = [(x, y) for x in range(min(corner_span, self.grid_size))
                       for y in range(min(corner_span, self.grid_size))
                       if self.window_tag_map is not None and self.window_tag_map[x, y] == 0]
@@ -314,35 +212,29 @@ class BattlefieldEnv:
                 continue
             return s, g
 
+        # 回退：找任意一对距离够远的可通行格子
+        all_free = [(x, y) for x in range(self.grid_size) for y in range(self.grid_size)
+                    if self.window_tag_map is not None and self.window_tag_map[x, y] == 0]
+        if len(all_free) >= 2:
+            best = (all_free[0], all_free[-1])
+            best_dist = float(np.linalg.norm(
+                np.array(all_free[0], dtype=np.float32) - np.array(all_free[-1], dtype=np.float32)))
+            for _ in range(256):
+                i, j = int(rng.integers(0, len(all_free))), int(rng.integers(0, len(all_free)))
+                if i == j:
+                    continue
+                d = float(np.linalg.norm(
+                    np.array(all_free[i], dtype=np.float32) - np.array(all_free[j], dtype=np.float32)))
+                if d > best_dist:
+                    best_dist = d
+                    best = (all_free[i], all_free[j])
+            return best
+
         return tuple(self.config.start), tuple(self.config.goal)
 
-    def _has_feasible_path_window(self) -> bool:
-        """窗口内的 BFS 可达性检查，仅走 tag=0 且满足爬坡约束的格子。"""
-        start = tuple(self.start_position.tolist())
-        goal = tuple(self.goal_position.tolist())
-        queue: deque[tuple[int, int]] = deque([start])
-        visited = {start}
-        while queue:
-            current = queue.popleft()
-            if current == goal:
-                return True
-            current_arr = np.array(current, dtype=np.int32)
-            for action_idx in self.get_valid_actions(current_arr):
-                move = np.array(self.ACTIONS[action_idx], dtype=np.int32)
-                neighbor = tuple((current_arr + move).tolist())
-                if neighbor in visited:
-                    continue
-                visited.add(neighbor)
-                queue.append(neighbor)
-        return False
 
-    def _compute_visibility_area_score_window(self, enemy_xy: tuple[int, int]) -> float:
-        """窗口内以 enemy_xy 为观察者的可见格子总数。"""
-        score = 0.0
-        for x in range(self.grid_size):
-            for y in range(self.grid_size):
-                score += self._compute_cell_visibility_from(enemy_xy, (x, y))
-        return score
+    def _has_feasible_path_window(self) -> bool:
+        return self.compute_bfs_path() is not None
 
     # ============================================================
     #  通行检查（tan 爬坡 + tag 约束）
@@ -356,14 +248,14 @@ class BattlefieldEnv:
             return True
         dx = abs(candidate[0] - current[0])
         dy = abs(candidate[1] - current[1])
-        if dx + dy == 2:  # 对角线
+        # 判断是否对角移动
+        if dx + dy == 2:
             dist = self.config.cell_size * sqrt(2.0)
         else:
             dist = self.config.cell_size
         return (dh / dist) <= self.config.max_climb_tan
 
     def _cell_passable(self, x: int, y: int) -> bool:
-        """检查窗口坐标 (x, y) 是否可通行（tag=0）。全图模式检查 tag，随机模式始终可通行。"""
         if self.window_tag_map is not None:
             return bool(self.window_tag_map[x, y] == 0)
         return True
@@ -374,7 +266,6 @@ class BattlefieldEnv:
             return True
         if not self._cell_passable(x, y):
             return True
-        # 全图模式下敌人可能在窗口外，仅敌人在窗口内时检查碰撞
         if self.current_scenario_mode != "full_map":
             if x == int(self.enemy_position[0]) and y == int(self.enemy_position[1]):
                 return True
@@ -392,7 +283,133 @@ class BattlefieldEnv:
         return valid_actions
 
     # ============================================================
-    #  可见性计算（遮挡判定用全图高度）
+    #  RL 接口
+    # ============================================================
+
+    def reset(self, seed: int | None = None) -> np.ndarray:
+        if seed is not None:
+            self.generate_scene(scene_seed=seed)
+        else:
+            self.generate_scene()
+        self.agent_position = self.start_position.copy()
+        self.steps = 0
+        self.consecutive_collisions = 0
+        self.total_collisions = 0
+        return self._get_observation()
+
+    def step(self, action: int) -> tuple[np.ndarray, float, bool, dict]:
+        old_pos = self.agent_position.copy()
+        move = np.array(self.ACTIONS[action], dtype=np.int32)
+        candidate = old_pos + move
+
+        if self._is_blocked(candidate):
+            self.consecutive_collisions += 1
+            self.total_collisions += 1
+            reward = -self.config.collision_penalty
+        else:
+            self.agent_position = candidate.copy()
+            self.consecutive_collisions = 0
+            reward = -self.config.step_penalty
+
+            old_dist = float(np.linalg.norm(
+                old_pos.astype(np.float32) - self.goal_position.astype(np.float32)))
+            new_dist = float(np.linalg.norm(
+                self.agent_position.astype(np.float32) - self.goal_position.astype(np.float32)))
+            reward += self.current_progress_weight * (old_dist - new_dist)
+
+            if self.visibility_map[tuple(self.agent_position)] > 0.5:
+                reward -= self.config.visible_penalty
+
+        self.steps += 1
+        done = False
+        info: dict = {}
+
+        if np.array_equal(self.agent_position, self.goal_position):
+            reward += self.config.goal_reward
+            done = True
+            info["result"] = "success"
+        elif self.steps >= self.config.max_steps:
+            reward -= 5.0
+            done = True
+            info["result"] = "timeout"
+        elif self.consecutive_collisions >= self.config.max_consecutive_collisions:
+            done = True
+            info["result"] = "stuck"
+
+        info["collisions"] = self.total_collisions
+        return self._get_observation(), reward, done, info
+
+    def _get_observation(self) -> np.ndarray:
+        H, W = self.grid_size, self.grid_size
+
+        ch_height = self.height_map.astype(np.float32) / max(1.0, float(self.height_levels))
+
+        if self.window_tag_map is not None:
+            ch_ground = (self.window_tag_map == 0).astype(np.float32)
+            ch_building = (self.window_tag_map == 1).astype(np.float32)
+            ch_tree = (self.window_tag_map == 2).astype(np.float32)
+        else:
+            ch_ground = np.ones((H, W), dtype=np.float32)
+            ch_building = np.zeros((H, W), dtype=np.float32)
+            ch_tree = np.zeros((H, W), dtype=np.float32)
+
+        ch_vis = self.visibility_map.astype(np.float32)
+
+        sigma = 2.0
+        ys, xs = np.meshgrid(np.arange(H), np.arange(W), indexing="ij")
+        xs = xs.astype(np.float32)
+        ys = ys.astype(np.float32)
+
+        ax, ay = float(self.agent_position[0]), float(self.agent_position[1])
+        ch_agent = np.exp(-((xs - ax) ** 2 + (ys - ay) ** 2) / (2 * sigma ** 2))
+
+        gx, gy = float(self.goal_position[0]), float(self.goal_position[1])
+        ch_goal = np.exp(-((xs - gx) ** 2 + (ys - gy) ** 2) / (2 * sigma ** 2))
+
+        obs = np.stack([ch_height, ch_ground, ch_building, ch_tree, ch_vis, ch_agent, ch_goal], axis=0)
+        return obs.astype(np.float32)
+
+    def get_action_mask(self) -> np.ndarray:
+        valid = self.get_valid_actions()
+        mask = np.zeros(8, dtype=bool)
+        mask[valid] = True
+        return mask
+
+    def compute_bfs_path(self) -> list[tuple[int, int]] | None:
+        """BFS 最短路径搜索，使用与可达性检查完全相同的通行规则。
+
+        Returns:
+            从 start_position 到 goal_position 的格子序列（含起终点），无路径时返回 None。
+        """
+        start = tuple(self.start_position.tolist())
+        goal = tuple(self.goal_position.tolist())
+        queue: deque[tuple[int, int]] = deque([start])
+        visited = {start}
+        parent: dict[tuple[int, int], tuple[int, int]] = {}
+
+        while queue:
+            current = queue.popleft()
+            if current == goal:
+                path: list[tuple[int, int]] = [current]
+                while current in parent:
+                    current = parent[current]
+                    path.append(current)
+                path.reverse()
+                return path
+
+            current_arr = np.array(current, dtype=np.int32)
+            for action_idx in self.get_valid_actions(current_arr):
+                move = np.array(self.ACTIONS[action_idx], dtype=np.int32)
+                neighbor = tuple((current_arr + move).tolist())
+                if neighbor not in visited:
+                    visited.add(neighbor)
+                    parent[neighbor] = current
+                    queue.append(neighbor)
+
+        return None
+
+    # ============================================================
+    #  可见性与遮挡（委托给 env.occlusion）
     # ============================================================
 
     def _finalize_scene_maps(self) -> None:
@@ -423,78 +440,23 @@ class BattlefieldEnv:
         return 1.0
 
     def _is_occluded_from(self, start: tuple[int, int], end: tuple[int, int]) -> bool:
-        """start 在 enemy_position 坐标系（全图模式=全局，否则=窗口），end 在窗口坐标。"""
         if start == end:
             return False
-
         if self.current_scenario_mode == "full_map" and self.full_terrain is not None:
             return self._is_occluded_global(start, end)
-
-        # 随机/固定模式：都在窗口坐标内
-        start_x, start_y = float(start[0]) + 0.5, float(start[1]) + 0.5
-        end_x, end_y = float(end[0]) + 0.5, float(end[1]) + 0.5
-        start_z = self._cell_height(start) + float(self.config.enemy_eye_height)
-        end_z = self._cell_height(end) + float(self.config.target_visibility_height)
-
-        length_xy = max(abs(end_x - start_x), abs(end_y - start_y))
-        samples = max(2, int(length_xy * max(1, self.config.line_of_sight_samples_per_cell)))
-        occluder_bias = float(self.config.visibility_occluder_bias)
-
-        for i in range(1, samples):
-            t = i / samples
-            px = start_x + (end_x - start_x) * t
-            py = start_y + (end_y - start_y) * t
-            pz = start_z + (end_z - start_z) * t
-            cx = int(np.clip(np.floor(px), 0, self.grid_size - 1))
-            cy = int(np.clip(np.floor(py), 0, self.grid_size - 1))
-            cell = (cx, cy)
-            if cell == start or cell == end:
-                continue
-            if self._cell_height(cell) + occluder_bias >= pz:
-                return True
-        return False
+        return is_occluded(start, end, self.height_map, self.config)
 
     def _is_occluded_global(self, start_global: tuple[int, int], end_window: tuple[int, int]) -> bool:
-        """全图模式：start 是全局坐标，end 是窗口坐标，射线在全局空间采样。"""
         ox, oy = self.window_offset
         ft = self.full_terrain
-        H, W = ft.height_map.shape
         end_global = (end_window[0] + oy, end_window[1] + ox)
-
-        if start_global == end_global:
-            return False
-
-        sx = float(start_global[0]) + 0.5
-        sy = float(start_global[1]) + 0.5
-        ex = float(end_global[0]) + 0.5
-        ey = float(end_global[1]) + 0.5
-        sz = float(ft.height_map[start_global]) + float(self.config.enemy_eye_height)
-        ez = float(ft.height_map[end_global]) + float(self.config.target_visibility_height)
-
-        length_xy = max(abs(ex - sx), abs(ey - sy))
-        samples = max(2, int(length_xy * max(1, self.config.line_of_sight_samples_per_cell)))
-        bias = float(self.config.visibility_occluder_bias)
-
-        for i in range(1, samples):
-            t = i / samples
-            px = sx + (ex - sx) * t
-            py = sy + (ey - sy) * t
-            pz = sz + (ez - sz) * t
-            cx = int(np.clip(np.floor(px), 0, H - 1))
-            cy = int(np.clip(np.floor(py), 0, W - 1))
-            cell = (cx, cy)
-            if cell == start_global or cell == end_global:
-                continue
-            if float(ft.height_map[cell]) + bias >= pz:
-                return True
-        return False
+        return is_occluded(start_global, end_global, ft.height_map, self.config)
 
     def _cell_height(self, cell: tuple[int, int]) -> float:
-        """读取格子高度（窗口视图）。"""
         return float(self.height_map[cell])
 
     # ============================================================
-    #  固定场景 / 随机场景（保留向后兼容）
+    #  固定场景 / 随机场景
     # ============================================================
 
     def _build_fixed_scene(self) -> None:
@@ -659,129 +621,14 @@ class BattlefieldEnv:
         self.enemy_position[2] = self._cell_height((ex, ey))
 
     def _has_feasible_path(self) -> bool:
-        start = tuple(self.start_position.tolist())
-        goal = tuple(self.goal_position.tolist())
-        queue: deque[tuple[int, int]] = deque([start])
-        visited = {start}
+        return self.compute_bfs_path() is not None
 
-        while queue:
-            current = queue.popleft()
-            if current == goal:
-                return True
-            current_arr = np.array(current, dtype=np.int32)
-            for action_idx in self.get_valid_actions(current_arr):
-                move = np.array(self.ACTIONS[action_idx], dtype=np.int32)
-                neighbor = tuple((current_arr + move).tolist())
-                if neighbor in visited:
-                    continue
-                visited.add(neighbor)
-                queue.append(neighbor)
-        return False
-
-    # ============================================================
-    #  observation 构建
-    # ============================================================
-
-    def _extract_local_map(self) -> np.ndarray:
-        size = self.config.local_map_size
-        grid = self.grid_size
-
-        # 敌人在窗口内的位置（窗口坐标），不在窗口内则 clamp 到最近边界
-        enemy_win_x = int(self.enemy_position[0])
-        enemy_win_y = int(self.enemy_position[1])
-        if self.current_scenario_mode == "full_map" and self.full_terrain is not None:
-            ox, oy = self.window_offset  # ox=col offset, oy=row offset
-            enemy_win_x = enemy_win_x - oy  # global_row - row_offset → window_row
-            enemy_win_y = enemy_win_y - ox  # global_col - col_offset → window_col
-        enemy_win_x = max(0, min(grid - 1, enemy_win_x))
-        enemy_win_y = max(0, min(grid - 1, enemy_win_y))
-
-        passable = np.ones((grid, grid), dtype=np.float32)
-        if self.window_tag_map is not None:
-            passable = (self.window_tag_map == 0).astype(np.float32)
-
-        if size >= grid:
-            occ = self.occupancy_map.astype(np.float32)
-            vis = self.visibility_map.astype(np.float32)
-            goal = np.zeros_like(occ, dtype=np.float32)
-            goal[tuple(self.goal_position)] = 1.0
-            agent = np.zeros_like(occ, dtype=np.float32)
-            agent[tuple(self.agent_position)] = 1.0
-            enemy_ch = np.zeros_like(occ, dtype=np.float32)
-            enemy_ch[enemy_win_x, enemy_win_y] = 1.0
-            waypoint_ch = np.zeros_like(occ, dtype=np.float32)
-            if self.current_subgoal is not None:
-                waypoint_ch[tuple(self.current_subgoal)] = 1.0
-            return np.stack((passable, occ, vis, goal, agent, enemy_ch, waypoint_ch), axis=0).astype(np.float32)
-
-        radius = size // 2
-        padded_passable = np.pad(passable, radius, mode="constant", constant_values=0.0)
-        padded_occ = np.pad(self.occupancy_map, radius, mode="constant", constant_values=1.0)
-        padded_visibility = np.pad(self.visibility_map, radius, mode="constant")
-        padded_goal = np.pad(np.zeros_like(self.occupancy_map, dtype=np.float32), radius, mode="constant")
-        padded_agent = np.pad(np.zeros_like(self.occupancy_map, dtype=np.float32), radius, mode="constant")
-        padded_enemy = np.pad(np.zeros_like(self.occupancy_map, dtype=np.float32), radius, mode="constant")
-
-        ax, ay = self.agent_position + radius
-        gx, gy = self.goal_position
-        goal_x = gx - self.agent_position[0] + radius
-        goal_y = gy - self.agent_position[1] + radius
-        if 0 <= goal_x < size and 0 <= goal_y < size:
-            padded_goal[ax - radius + goal_x, ay - radius + goal_y] = 1.0
-        padded_agent[ax, ay] = 1.0
-        # 敌人在智能体为中心的局部视野中
-        enemy_lx = enemy_win_x - self.agent_position[0] + radius
-        enemy_ly = enemy_win_y - self.agent_position[1] + radius
-        if 0 <= enemy_lx < size and 0 <= enemy_ly < size:
-            padded_enemy[ax - radius + enemy_lx, ay - radius + enemy_ly] = 1.0
-
-        padded_waypoint = np.pad(np.zeros_like(self.occupancy_map, dtype=np.float32), radius, mode="constant")
-        if self.current_subgoal is not None:
-            wpx = self.current_subgoal[0] - self.agent_position[0] + radius
-            wpy = self.current_subgoal[1] - self.agent_position[1] + radius
-            if 0 <= wpx < size and 0 <= wpy < size:
-                padded_waypoint[ax - radius + wpx, ay - radius + wpy] = 1.0
-
-        xs = slice(ax - radius, ax + radius + 1)
-        ys = slice(ay - radius, ay + radius + 1)
-        return np.stack(
-            (padded_passable[xs, ys], padded_occ[xs, ys], padded_visibility[xs, ys], padded_goal[xs, ys],
-             padded_agent[xs, ys], padded_enemy[xs, ys], padded_waypoint[xs, ys]),
-            axis=0,
-        ).astype(np.float32)
-
-    def _build_global_features(self) -> np.ndarray:
-        relative_goal = (self.goal_position - self.agent_position).astype(np.float32) / self.grid_size
-
-        if self.current_scenario_mode == "full_map" and self.full_terrain is not None:
-            ox, oy = self.window_offset
-            agent_global = self.agent_position.astype(np.float32) + np.array((float(oy), float(ox)), dtype=np.float32)
-            norm = float(max(self.full_terrain.full_height, self.full_terrain.full_width))
-            relative_enemy = (self.enemy_position[:2] - agent_global) / norm
-            enemy_distance = np.array([np.linalg.norm(self.enemy_position[:2] - agent_global) / norm], dtype=np.float32)
-        else:
-            relative_enemy = (self.enemy_position[:2] - self.agent_position.astype(np.float32)) / self.grid_size
-            enemy_distance = np.array([np.linalg.norm(relative_enemy)], dtype=np.float32)
-
-        goal_distance = np.array([self._goal_distance(self.agent_position) / self.grid_size], dtype=np.float32)
-        current_visibility = np.array([self.visibility_map[tuple(self.agent_position)]], dtype=np.float32)
-        hidden_ratio = np.array([self.hidden_ratio], dtype=np.float32)
-
-        # 航点特征 (4 维)
-        if self.current_subgoal is not None:
-            wp_relative = (self.current_subgoal.astype(np.float32) - self.agent_position.astype(np.float32)) / self.grid_size
-            wp_distance = np.array([np.linalg.norm(wp_relative)], dtype=np.float32)
-            wp_active = np.array([1.0], dtype=np.float32)
-        else:
-            wp_relative = np.zeros(2, dtype=np.float32)
-            wp_distance = np.array([0.0], dtype=np.float32)
-            wp_active = np.array([0.0], dtype=np.float32)
-
-        return np.concatenate(
-            (relative_goal, relative_enemy, goal_distance, enemy_distance, current_visibility, hidden_ratio,
-             wp_relative, wp_distance, wp_active),
-            dtype=np.float32,
-        )
+    def _compute_visibility_area_score_window(self, enemy_xy: tuple[int, int]) -> float:
+        score = 0.0
+        for x in range(self.grid_size):
+            for y in range(self.grid_size):
+                score += self._compute_cell_visibility_from(enemy_xy, (x, y))
+        return score
 
     # ============================================================
     #  工具方法
@@ -793,4 +640,3 @@ class BattlefieldEnv:
     @staticmethod
     def _move_cost(move: np.ndarray) -> float:
         return sqrt(2.0) if abs(int(move[0])) + abs(int(move[1])) == 2 else 1.0
-

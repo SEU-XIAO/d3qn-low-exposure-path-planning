@@ -19,6 +19,7 @@ from scipy.ndimage import maximum_filter, minimum_filter, uniform_filter
 
 from config import EnvConfig
 from env.terrain_loader import FullTerrain, load_terrain
+from env.occlusion import is_occluded, compute_visibility_map
 
 
 def compute_feature_scores(terrain: FullTerrain) -> np.ndarray:
@@ -67,75 +68,6 @@ def spatial_suppression(scores: np.ndarray, k: int = 8, radius: int = 60) -> lis
         remaining[x0:x1, y0:y1] *= 0.3
 
     return selected
-
-
-def _is_occluded(
-    start: tuple[int, int],
-    end: tuple[int, int],
-    height_map: np.ndarray,
-    config: EnvConfig,
-) -> bool:
-    """检查 start → end 视线是否被地形遮挡（全局坐标系）。"""
-    if start == end:
-        return False
-
-    H, W = height_map.shape
-    sx = float(start[0]) + 0.5
-    sy = float(start[1]) + 0.5
-    ex = float(end[0]) + 0.5
-    ey = float(end[1]) + 0.5
-    sz = float(height_map[start]) + float(config.enemy_eye_height)
-    ez = float(height_map[end]) + float(config.target_visibility_height)
-
-    length_xy = max(abs(ex - sx), abs(ey - sy))
-    samples = max(2, int(length_xy * max(1, config.line_of_sight_samples_per_cell)))
-    bias = float(config.visibility_occluder_bias)
-
-    for i in range(1, samples):
-        t = i / samples
-        px = sx + (ex - sx) * t
-        py = sy + (ey - sy) * t
-        pz = sz + (ez - sz) * t
-        cx = int(np.clip(np.floor(px), 0, H - 1))
-        cy = int(np.clip(np.floor(py), 0, W - 1))
-        cell = (cx, cy)
-        if cell == start or cell == end:
-            continue
-        if float(height_map[cell]) + bias >= pz:
-            return True
-    return False
-
-
-def compute_visibility_map(
-    observer: tuple[int, int],
-    terrain: FullTerrain,
-    config: EnvConfig,
-) -> tuple[np.ndarray, float]:
-    """为单个观察者计算全图二值可见性底图。
-
-    返回 (vis_map, visible_count)，其中 vis_map 为 (H,W) bool 数组。
-    """
-    H, W = terrain.height_map.shape
-    vis_map = np.zeros((H, W), dtype=np.bool_)
-    t0 = time.perf_counter()
-    visible = 0
-
-    for x in range(H):
-        for y in range(W):
-            cell = (x, y)
-            if cell == observer:
-                continue
-            if not _is_occluded(observer, cell, terrain.height_map, config):
-                vis_map[x, y] = True
-                visible += 1
-
-        # 每 50 行汇报一次进度
-        if x % 50 == 0 and x > 0:
-            elapsed = time.perf_counter() - t0
-            eta = elapsed / (x + 1) * (H - x - 1)
-            print(f"    row {x}/{H} | visible={visible:7d} | {elapsed:.0f}s eta={eta:.0f}s")
-
-    return vis_map, float(visible)
 
 
 def main() -> None:

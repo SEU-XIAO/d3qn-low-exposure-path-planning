@@ -25,9 +25,15 @@ def load_terrain(filepath: str) -> FullTerrain:
     格式：每行由分号分隔的 (height,tag) 元组。
     不规则行（末尾数据缺失）用 height=0, tag=1 填充。
     """
+    # 对txt当中的数据进行正则化匹配，左括号+多个数字+逗号+一个数字+右括号
     pattern = re.compile(r"\((\d+),(\d)\)")
 
+    #rows_data = [
+    #[(0,1), (0,2)],    # 第 0 行，有两个坐标点
+    #[(1,0), (1,1)],    # 第 1 行
+    #]
     rows_data: list[list[tuple[int, int]]] = []
+
     with open(filepath, "r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
@@ -46,6 +52,7 @@ def load_terrain(filepath: str) -> FullTerrain:
     height_map = np.zeros((full_height, full_width), dtype=np.int32)
     tag_map = np.ones((full_height, full_width), dtype=np.int32)  # 默认 tag=1 不可通行
 
+    # 从每一行中解析出高度与tag
     for y, row in enumerate(rows_data):
         if not row:
             continue
@@ -53,6 +60,7 @@ def load_terrain(filepath: str) -> FullTerrain:
             height_map[y, x] = h
             tag_map[y, x] = t
 
+    # 高度为0判定为道路，其他判定为树木或者建筑物，自然是不能通过
     passable_map = (tag_map == 0)
 
     return FullTerrain(

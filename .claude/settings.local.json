@@ -1,7 +1,7 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python -c ' *)",
+      "Bash(python -c :*)",
       "Bash(iconv -f gbk -t utf-8)",
       "Bash(python env/enemy_search.py)",
       "Bash(python -c \"import sys; print\\('\\\\n'.join\\(sys.path\\)\\)\")",

@@ -1,3 +1,3 @@
-from .policy_network import HybridPolicyNetwork
+from .policy_network import ActorCriticCNN, random_augment, deaugment_action, ACTIONS
 
-__all__ = ["HybridPolicyNetwork"]
+__all__ = ["ActorCriticCNN", "random_augment", "deaugment_action", "ACTIONS"]
