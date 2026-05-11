@@ -103,7 +103,7 @@ def visualize_scene(env, title: str = "场景地形标签", ax=None):
     if ax is None:
         _, ax = plt.subplots(figsize=(8.5, 8.5))
 
-    ax.imshow(rgba.transpose(1, 0, 2), origin="lower", interpolation="nearest")
+    ax.imshow(rgba, origin="lower", interpolation="nearest")
     _draw_cell_grid(ax, env.grid_size)
     _draw_markers(ax, env)
 
@@ -147,7 +147,7 @@ def visualize_visibility(env, title: str = "二值可见性 / 遮挡", ax=None):
     if ax is None:
         _, ax = plt.subplots(figsize=(8.5, 8.5))
 
-    ax.imshow(rgba.transpose(1, 0, 2), origin="lower", interpolation="nearest")
+    ax.imshow(rgba, origin="lower", interpolation="nearest")
 
     # 障碍物格子画斜线纹理，与可见/遮挡区分
     if tag_map is not None:
@@ -213,7 +213,7 @@ def visualize_path(env, title: str = "BFS 最短路径", ax=None):
     if ax is None:
         _, ax = plt.subplots(figsize=(8.5, 8.5))
 
-    ax.imshow(rgba.transpose(1, 0, 2), origin="lower", interpolation="nearest")
+    ax.imshow(rgba, origin="lower", interpolation="nearest")
     _draw_cell_grid(ax, env.grid_size)
 
     # 障碍物图案：建筑 = X，树木 = 竖线

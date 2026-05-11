@@ -1,0 +1,148 @@
+{
+  "episodes": [
+    {
+      "episode": 0,
+      "scene_seed": 6371573,
+      "image": "ep_00_seed_6371573.png",
+      "result": "success",
+      "success": 1,
+      "steps": 30,
+      "exposure": 0.0,
+      "n_waypoints": 10,
+      "replan_count": 0,
+      "fallback_used_count": 0
+    },
+    {
+      "episode": 1,
+      "scene_seed": 9826869,
+      "image": "ep_01_seed_9826869.png",
+      "result": "success",
+      "success": 1,
+      "steps": 41,
+      "exposure": 0.0,
+      "n_waypoints": 13,
+      "replan_count": 0,
+      "fallback_used_count": 0
+    },
+    {
+      "episode": 2,
+      "scene_seed": 8599012,
+      "image": "ep_02_seed_8599012.png",
+      "result": "success",
+      "success": 1,
+      "steps": 38,
+      "exposure": 0.0,
+      "n_waypoints": 11,
+      "replan_count": 0,
+      "fallback_used_count": 0
+    },
+    {
+      "episode": 3,
+      "scene_seed": 4831746,
+      "image": "ep_03_seed_4831746.png",
+      "result": "success",
+      "success": 1,
+      "steps": 50,
+      "exposure": 0.0,
+      "n_waypoints": 15,
+      "replan_count": 0,
+      "fallback_used_count": 0
+    },
+    {
+      "episode": 4,
+      "scene_seed": 4115134,
+      "image": "ep_04_seed_4115134.png",
+      "result": "success",
+      "success": 1,
+      "steps": 38,
+      "exposure": 0.0,
+      "n_waypoints": 12,
+      "replan_count": 0,
+      "fallback_used_count": 0
+    },
+    {
+      "episode": 5,
+      "scene_seed": 5518687,
+      "image": "ep_05_seed_5518687.png",
+      "result": "success",
+      "success": 1,
+      "steps": 48,
+      "exposure": 0.0,
+      "n_waypoints": 15,
+      "replan_count": 0,
+      "fallback_used_count": 0
+    },
+    {
+      "episode": 6,
+      "scene_seed": 1260937,
+      "image": "ep_06_seed_1260937.png",
+      "result": "success",
+      "success": 1,
+      "steps": 36,
+      "exposure": 0.0,
+      "n_waypoints": 11,
+      "replan_count": 0,
+      "fallback_used_count": 0
+    },
+    {
+      "episode": 7,
+      "scene_seed": 5906584,
+      "image": "ep_07_seed_5906584.png",
+      "result": "success",
+      "success": 1,
+      "steps": 35,
+      "exposure": 0.0,
+      "n_waypoints": 10,
+      "replan_count": 0,
+      "fallback_used_count": 0
+    },
+    {
+      "episode": 8,
+      "scene_seed": 9448470,
+      "image": "ep_08_seed_9448470.png",
+      "result": "success",
+      "success": 1,
+      "steps": 45,
+      "exposure": 0.0,
+      "n_waypoints": 15,
+      "replan_count": 0,
+      "fallback_used_count": 0
+    },
+    {
+      "episode": 9,
+      "scene_seed": 5820964,
+      "image": "ep_09_seed_5820964.png",
+      "result": "success",
+      "success": 1,
+      "steps": 36,
+      "exposure": 0.0,
+      "n_waypoints": 11,
+      "replan_count": 0,
+      "fallback_used_count": 0
+    },
+    {
+      "episode": 10,
+      "scene_seed": 5077429,
+      "image": "ep_10_seed_5077429.png",
+      "result": "success",
+      "success": 1,
+      "steps": 44,
+      "exposure": 0.0,
+      "n_waypoints": 14,
+      "replan_count": 0,
+      "fallback_used_count": 0
+    },
+    {
+      "episode": 11,
+      "scene_seed": 2722236,
+      "image": "ep_11_seed_2722236.png",
+      "result": "success",
+      "success": 1,
+      "steps": 45,
+      "exposure": 0.0,
+      "n_waypoints": 14,
+      "replan_count": 0,
+      "fallback_used_count": 0
+    }
+  ]
+}

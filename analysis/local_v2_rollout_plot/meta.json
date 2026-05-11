@@ -1,0 +1,28 @@
+{
+  "episodes": [
+    {
+      "episode": 0,
+      "scene_seed": 8518520,
+      "image": "ep_00_seed_8518520.png",
+      "result": "success",
+      "success": 1,
+      "steps": 39,
+      "exposure": 0.0,
+      "n_waypoints": 12,
+      "replan_count": 0,
+      "fallback_used_count": 0
+    },
+    {
+      "episode": 1,
+      "scene_seed": 1789348,
+      "image": "ep_01_seed_1789348.png",
+      "result": "success",
+      "success": 1,
+      "steps": 47,
+      "exposure": 0.0,
+      "n_waypoints": 16,
+      "replan_count": 0,
+      "fallback_used_count": 0
+    }
+  ]
+}
