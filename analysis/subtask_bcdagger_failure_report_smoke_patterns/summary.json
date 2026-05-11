@@ -1,0 +1,19 @@
+{
+  "n_total": 200,
+  "n_fail": 53,
+  "fail_ratio": 0.265,
+  "tag_counts": {
+    "timeout_far_goal": 15,
+    "oscillation": 23,
+    "path_deviation": 52,
+    "timeout_near_goal": 38,
+    "stagnation": 8
+  },
+  "tag_ratios_over_fail": {
+    "timeout_far_goal": 0.2830188679245283,
+    "oscillation": 0.4339622641509434,
+    "path_deviation": 0.9811320754716981,
+    "timeout_near_goal": 0.7169811320754716,
+    "stagnation": 0.1509433962264151
+  }
+}

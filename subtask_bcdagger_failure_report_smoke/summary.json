@@ -1,0 +1,8 @@
+{
+  "n_eval": 200,
+  "success_rate": 0.735,
+  "timeout_rate": 0.265,
+  "stuck_rate": 0.0,
+  "avg_steps": 21.595,
+  "avg_exposure": 0.0565952380952381
+}

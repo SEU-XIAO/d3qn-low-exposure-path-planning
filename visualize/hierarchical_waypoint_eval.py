@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import argparse
 import json
@@ -10,6 +10,7 @@ import torch
 
 from config import EnvConfig
 from env.battlefield_env import BattlefieldEnv
+from env.obs import add_obs_args
 from experiment_config import add_config_args, parse_args_with_config
 from models.actor_critic_cnn import ActorCriticCNN, infer_model_spec
 from planner import StealthCostConfig, WaypointConfig, extract_waypoints, plan_stealth_path
@@ -32,32 +33,6 @@ def _to_tuple(pos: np.ndarray) -> tuple[int, int]:
 
 def _dist(a: tuple[int, int], b: tuple[int, int]) -> float:
     return float(np.linalg.norm(np.array(a, dtype=np.float32) - np.array(b, dtype=np.float32)))
-
-
-def _crop_observation(obs: np.ndarray, center: tuple[int, int], view_size: int) -> np.ndarray:
-    c, h, w = obs.shape
-    if view_size >= h and view_size >= w:
-        return obs
-    half = view_size // 2
-    cx, cy = center
-    x0 = cx - half
-    y0 = cy - half
-    x1 = x0 + view_size
-    y1 = y0 + view_size
-
-    src_x0 = max(0, x0)
-    src_y0 = max(0, y0)
-    src_x1 = min(h, x1)
-    src_y1 = min(w, y1)
-
-    dst_x0 = src_x0 - x0
-    dst_y0 = src_y0 - y0
-    dst_x1 = dst_x0 + (src_x1 - src_x0)
-    dst_y1 = dst_y0 + (src_y1 - src_y0)
-
-    out = np.zeros((c, view_size, view_size), dtype=np.float32)
-    out[:, dst_x0:dst_x1, dst_y0:dst_y1] = obs[:, src_x0:src_x1, src_y0:src_y1]
-    return out
 
 
 def _render_ascii_map(env: BattlefieldEnv, trajectory: list[list[int]]) -> str:
@@ -181,7 +156,7 @@ def _run_episode(
         }
 
     wp_idx = 0
-    env.goal_position = np.array(waypoints[wp_idx], dtype=np.int32)
+    env.set_goal(waypoints[wp_idx])
     n_waypoints = len(waypoints)
     done = False
     info: dict = {"result": "unknown", "collisions": 0}
@@ -217,8 +192,6 @@ def _run_episode(
                     _obs, _reward, done, info = env.step(action)
         else:
             obs = env._get_observation()
-            if policy_view_size > 0 and policy_view_size < env.grid_size:
-                obs = _crop_observation(obs, _to_tuple(env.agent_position), policy_view_size)
             obs_t = torch.from_numpy(obs).unsqueeze(0).to(device)
             mask_t = torch.from_numpy(env.get_action_mask()).unsqueeze(0).to(device)
             with torch.no_grad():
@@ -237,14 +210,14 @@ def _run_episode(
         else:
             stagnation += 1
 
-        # 子目标半径到达：切到下一个waypoint（最终目标除外）
+        # 瀛愮洰鏍囧崐寰勫埌杈撅細鍒囧埌涓嬩竴涓獁aypoint锛堟渶缁堢洰鏍囬櫎澶栵級
         if not done and cur_dist <= waypoint_reach_radius and wp_idx < len(waypoints) - 1:
             wp_idx += 1
-            env.goal_position = np.array(waypoints[wp_idx], dtype=np.int32)
+            env.set_goal(waypoints[wp_idx])
             best_dist = _dist(_to_tuple(env.agent_position), _to_tuple(env.goal_position))
             stagnation = 0
 
-        # 近终点窄触发兜底
+        # 杩戠粓鐐圭獎瑙﹀彂鍏滃簳
         near_goal = cur_dist <= fallback_goal_radius
         near_timeout = (env.config.max_steps - env.steps) <= fallback_remaining_steps
         fallback_trigger = (stagnation >= fallback_stagnation) or near_timeout
@@ -263,10 +236,10 @@ def _run_episode(
                 pos = _to_tuple(env.agent_position)
                 trajectory.append([pos[0], pos[1]])
                 if success:
-                    # 到达当前子目标
+                    # 到达当前子目标后，继续切换到下一个 waypoint。
                     if wp_idx < len(waypoints) - 1:
                         wp_idx += 1
-                        env.goal_position = np.array(waypoints[wp_idx], dtype=np.int32)
+                        env.set_goal(waypoints[wp_idx])
                         best_dist = _dist(_to_tuple(env.agent_position), _to_tuple(env.goal_position))
                         stagnation = 0
                         done = False
@@ -278,7 +251,7 @@ def _run_episode(
                     done = True
                     info = {"result": "fallback_fail", "collisions": env.total_collisions}
 
-        # 停滞或碰撞重规划（面向最终目标）
+        # 鍋滄粸鎴栫鎾為噸瑙勫垝锛堥潰鍚戞渶缁堢洰鏍囷級
         if (
             not done
             and replan_count < replan_max
@@ -296,22 +269,21 @@ def _run_episode(
             if ok_new:
                 waypoints = waypoints_new
                 wp_idx = 0
-                env.goal_position = np.array(waypoints[wp_idx], dtype=np.int32)
+                env.set_goal(waypoints[wp_idx])
                 replan_count += 1
                 stagnation = 0
                 best_dist = _dist(_to_tuple(env.agent_position), _to_tuple(env.goal_position))
 
-        # 非最终子目标被 env 判定 success 时，改为继续执行
+        # 闈炴渶缁堝瓙鐩爣琚?env 鍒ゅ畾 success 鏃讹紝鏀逛负缁х画鎵ц
         if done and info.get("result") == "success" and wp_idx < len(waypoints) - 1:
             wp_idx += 1
-            env.goal_position = np.array(waypoints[wp_idx], dtype=np.int32)
+            env.set_goal(waypoints[wp_idx])
             best_dist = _dist(_to_tuple(env.agent_position), _to_tuple(env.goal_position))
             stagnation = 0
             done = False
             info = {"result": "waypoint", "collisions": env.total_collisions}
 
-        # 避免潜在死循环保护
-        if not done and ep_steps >= env.config.max_steps:
+        # 閬垮厤娼滃湪姝诲惊鐜繚鎶?        if not done and ep_steps >= env.config.max_steps:
             done = True
             info = {"result": "timeout", "collisions": env.total_collisions}
 
@@ -336,6 +308,7 @@ def _run_episode(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Hierarchical 50x50 eval: global waypoint planner + local RL", allow_abbrev=False)
     add_config_args(parser, default_section="hierarchical_waypoint_eval")
+    add_obs_args(parser, include_view_size=False)
     parser.add_argument("--model", type=str, required=True)
     parser.add_argument("--episodes", type=int, default=100)
     parser.add_argument("--seed", type=int, default=2026)
@@ -343,10 +316,10 @@ def main() -> None:
     parser.add_argument("--max-steps", type=int, default=220)
     parser.add_argument("--output-dir", type=str, default="analysis/hierarchical_50_eval")
     parser.add_argument("--save-fail-maps", type=int, default=30)
-    parser.add_argument("--policy-view-size", type=int, default=10, help="推理输入局部窗口边长；0表示使用全图")
+    parser.add_argument("--policy-view-size", type=int, default=10, help="策略局部观测边长；0表示使用整图")
     parser.add_argument("--executor", type=str, default="rl", choices=["rl", "planner"], help="局部执行器类型")
-    parser.add_argument("--subgoal-max-hop", type=int, default=4, help="相邻子目标在全局路径上的最大步长（10x10推荐4）")
-
+    parser.add_argument("--subgoal-max-hop", type=int, default=4, help="相邻子目标在全局路径上的最大步长")
+    parser.add_argument("--planner-guide", action="store_true", help="在观测中加入 planner 走廊通道")
     parser.add_argument("--w-len", type=float, default=1.0)
     parser.add_argument("--w-vis", type=float, default=2.5)
     parser.add_argument("--w-slope", type=float, default=0.8)
@@ -393,9 +366,18 @@ def main() -> None:
         EnvConfig(),
         grid_size=50,
         local_map_size=50,
+        obs_view_size=args.policy_view_size,
         scenario_mode="full_map",
         max_steps=args.max_steps,
-        planner_guide_channel=expected_channels > 10,
+        obs_line_guide=args.obs_line_guide,
+        obs_line_sigma=args.obs_line_sigma,
+        obs_use_visited=args.obs_visited,
+        obs_use_remaining=args.obs_remaining,
+        obs_use_stagnation=args.obs_stagnation,
+        obs_stagnation_cap=args.obs_stagnation_cap,
+        obs_use_prev_move=args.obs_prev_move,
+        obs_visit_decay=args.obs_visit_decay,
+        planner_guide_channel=args.planner_guide,
         planner_guide_sigma=args.planner_guide_sigma,
         planner_w_len=args.planner_w_len,
         planner_w_vis=args.planner_w_vis,

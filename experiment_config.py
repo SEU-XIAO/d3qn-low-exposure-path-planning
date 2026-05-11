@@ -34,10 +34,11 @@ def parse_args_with_config(
     if not known.config:
         return parser.parse_args(raw_argv)
 
-    config_tokens = _load_config_tokens(
+    section = _load_config_section(
         config_path=Path(known.config),
         section_name=known.config_section or default_section,
     )
+    config_tokens = _section_to_parser_tokens(parser, section, section_name=known.config_section or default_section)
     return parser.parse_args(config_tokens + raw_argv)
 
 
@@ -66,6 +67,16 @@ def dump_effective_config(
 
 
 def _load_config_tokens(config_path: Path, section_name: str) -> list[str]:
+    section = _load_config_section(config_path=config_path, section_name=section_name)
+    tokens: list[str] = []
+    for key, value in section.items():
+        if key in {"config", "config_section", "inherits"}:
+            continue
+        tokens.extend(_value_to_tokens(key, value))
+    return tokens
+
+
+def _load_config_section(config_path: Path, section_name: str) -> dict[str, Any]:
     config_path = _resolve_config_path(config_path)
     if not config_path.exists():
         raise FileNotFoundError(f"配置文件不存在: {config_path}")
@@ -73,13 +84,7 @@ def _load_config_tokens(config_path: Path, section_name: str) -> list[str]:
     with config_path.open("rb") as f:
         data = tomllib.load(f)
 
-    section = _resolve_section(data, section_name, seen=[])
-    tokens: list[str] = []
-    for key, value in section.items():
-        if key in {"config", "config_section", "inherits"}:
-            continue
-        tokens.extend(_value_to_tokens(key, value))
-    return tokens
+    return _resolve_section(data, section_name, seen=[])
 
 
 def _resolve_config_path(config_path: Path) -> Path:
@@ -149,3 +154,38 @@ def _jsonable(value: Any) -> Any:
     if isinstance(value, dict):
         return {str(k): _jsonable(v) for k, v in value.items()}
     return value
+
+
+def _section_to_parser_tokens(
+    parser: argparse.ArgumentParser,
+    section: dict[str, Any],
+    section_name: str,
+) -> list[str]:
+    action_map: dict[str, argparse.Action] = {}
+    for action in parser._actions:
+        if action.dest:
+            action_map[action.dest] = action
+
+    ignored: list[str] = []
+    tokens: list[str] = []
+    for key, value in section.items():
+        if key in {"config", "config_section", "inherits"}:
+            continue
+        if key not in action_map:
+            ignored.append(key)
+            continue
+        action = action_map[key]
+        if isinstance(value, bool):
+            flag = f"--{key.replace('_', '-')}"
+            no_flag = f"--no-{key.replace('_', '-')}"
+            if value:
+                tokens.append(flag)
+            elif no_flag in action.option_strings:
+                tokens.append(no_flag)
+            continue
+        tokens.extend(_value_to_tokens(key, value))
+
+    if ignored:
+        ignored_text = ", ".join(sorted(ignored))
+        print(f"[config] 节 `{section_name}` 忽略当前脚本不支持的键: {ignored_text}")
+    return tokens

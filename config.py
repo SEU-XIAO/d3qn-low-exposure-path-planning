@@ -6,6 +6,7 @@ class EnvConfig:
     grid_size: int = 50
     height_levels: int = 8
     local_map_size: int = 50
+    obs_view_size: int = 0
     max_steps: int = 200
 
     scenario_mode: str = "full_map"
@@ -36,6 +37,14 @@ class EnvConfig:
     line_of_sight_samples_per_cell: int = 2
 
     min_start_goal_distance: float = 30.0
+    obs_line_guide: bool = True
+    obs_line_sigma: float = 1.4
+    obs_use_visited: bool = False
+    obs_use_remaining: bool = False
+    obs_use_stagnation: bool = False
+    obs_stagnation_cap: int = 8
+    obs_use_prev_move: bool = False
+    obs_visit_decay: float = 0.92
     planner_guide_channel: bool = False
     planner_guide_sigma: float = 1.4
     planner_w_len: float = 1.0

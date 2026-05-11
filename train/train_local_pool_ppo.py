@@ -13,6 +13,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from config import EnvConfig
+from env.obs import add_obs_args
 from env.vectorized_env import VectorizedEnv
 from experiment_config import add_config_args, dump_effective_config, parse_args_with_config
 from models.actor_critic_cnn import (
@@ -459,6 +460,7 @@ def _evaluate_by_splits(
 def main() -> None:
     parser = argparse.ArgumentParser(description="局部窗口池 PPO 训练（并行）", allow_abbrev=False)
     add_config_args(parser, default_section="train_local_pool_ppo")
+    add_obs_args(parser)
     parser.add_argument("--steps", type=int, default=500_000)
     parser.add_argument("--pool", type=str, default="artifacts/window_pool_15.npz")
     parser.add_argument("--val-pool", type=str, default=None, help="独立验证池；为空则从训练池切分")
@@ -567,9 +569,18 @@ def main() -> None:
         EnvConfig(),
         grid_size=pool_grid,
         local_map_size=pool_grid,
+        obs_view_size=args.obs_view_size,
         max_steps=args.max_steps if args.max_steps is not None else adaptive_max_steps,
         visible_penalty=args.visible_penalty,
         progress_weight=args.progress_weight,
+        obs_line_guide=args.obs_line_guide,
+        obs_line_sigma=args.obs_line_sigma,
+        obs_use_visited=args.obs_visited,
+        obs_use_remaining=args.obs_remaining,
+        obs_use_stagnation=args.obs_stagnation,
+        obs_stagnation_cap=args.obs_stagnation_cap,
+        obs_use_prev_move=args.obs_prev_move,
+        obs_visit_decay=args.obs_visit_decay,
         planner_guide_channel=args.planner_guide,
         planner_guide_sigma=args.planner_guide_sigma,
         planner_w_len=args.planner_w_len,
@@ -597,8 +608,10 @@ def main() -> None:
     vec_env = VectorizedEnv(env_config, pool, num_envs=num_envs, seed=42, allowed_indices=train_indices)
     vec_env_val = VectorizedEnv(env_config, val_pool, num_envs=1, seed=7, allowed_indices=val_indices)
 
-    obs_channels = int(vec_env.get_observations().shape[1])
-    feature_dim = 256 if env_config.grid_size <= 15 else 512
+    obs_shape = tuple(int(v) for v in vec_env.get_observations().shape[1:])
+    obs_channels = int(obs_shape[0])
+    obs_hw = int(obs_shape[-1])
+    feature_dim = 256 if obs_hw <= 15 else 512
     policy = ActorCriticCNN(
         in_channels=obs_channels,
         feature_dim=feature_dim,
@@ -639,12 +652,12 @@ def main() -> None:
 
     buffer = RolloutBuffer(
         ppo_cfg.rollout_steps,
-        (obs_channels, env_config.grid_size, env_config.grid_size),
+        obs_shape,
         device,
     )
 
     n_params = sum(p.numel() for p in policy.parameters())
-    print(f"设备: {device}  参数: {n_params:,}  总步数: {ppo_cfg.total_steps:,}")
+    print(f"设备: {device}  参数: {n_params:,}  观测: {obs_shape}  总步数: {ppo_cfg.total_steps:,}")
 
     if args.curriculum:
         easy, mid, hard = _split_curriculum_indices(pool["bfs_lengths"][train_indices])
@@ -686,6 +699,7 @@ def main() -> None:
             "argv": sys.argv[1:],
             "device": str(device),
             "obs_channels": obs_channels,
+            "obs_shape": list(obs_shape),
             "feature_dim": feature_dim,
             "num_params": n_params,
             "planner_guide_channel": env_config.planner_guide_channel,

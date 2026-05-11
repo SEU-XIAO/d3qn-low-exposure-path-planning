@@ -1,27 +1,32 @@
-# 用法：
-#   python -m train.train_local_pool_ppo --config experiments/subtask_bcdagger_v1.toml
-#   python -m visualize.failure_case_report --config experiments/subtask_bcdagger_v1.toml
-#   python -m visualize.hierarchical_waypoint_eval --config experiments/subtask_bcdagger_v1.toml
-#
-# 覆盖单个参数时，命令行优先级更高，例如：
-#   python -m train.train_local_pool_ppo --config experiments/subtask_bcdagger_v1.toml --steps 800000
+# 用法:
+#   python -m train.train_local_pool_ppo --config experiments/local_v2.toml
+#   python -m visualize.failure_case_report --config experiments/local_v2.toml --config-section failure_case_report_smoke
+#   python -m visualize.hierarchical_waypoint_eval --config experiments/local_v2.toml
 
-[fragments.subtask_data]
+[fragments.data]
 pool = "artifacts/window_pool_10_subtask_30k.npz"
 val_ratio = 0.2
 
-[fragments.train_eval_schedule]
+[fragments.train_eval]
 curriculum = true
 eval_episodes = 50
 eval_full_every = 10
 
-[fragments.optimizer]
+[fragments.optim]
 lr = 1e-4
 entropy = 0.03
 epochs = 6
 backbone = "res_small"
 
-[fragments.planner_guide]
+[fragments.obs_v2]
+obs_view_size = 10
+obs_line_guide = false
+obs_visited = true
+obs_remaining = true
+obs_stagnation = true
+obs_stagnation_cap = 8
+obs_prev_move = true
+obs_visit_decay = 0.92
 planner_guide = true
 planner_guide_sigma = 1.4
 planner_w_len = 1.0
@@ -29,7 +34,14 @@ planner_w_vis = 2.5
 planner_w_slope = 0.8
 planner_w_turn = 0.15
 
-[fragments.planner_eval]
+[fragments.obs_eval]
+obs_line_guide = false
+obs_visited = true
+obs_remaining = true
+obs_stagnation = true
+obs_stagnation_cap = 8
+obs_prev_move = true
+obs_visit_decay = 0.92
 planner_guide = true
 planner_guide_sigma = 1.4
 planner_w_len = 1.0
@@ -37,7 +49,7 @@ planner_w_vis = 2.5
 planner_w_slope = 0.8
 planner_w_turn = 0.15
 
-[fragments.bc_dagger]
+[fragments.bc]
 expert_mode = "planner"
 bc_mode = "all"
 bc_weight = 0.15
@@ -45,11 +57,11 @@ bc_pretrain_steps = 2000
 bc_pretrain_batch_size = 256
 bc_near_goal_radius = 4.0
 
-[fragments.near_goal_fix]
+[fragments.near]
 near_goal_retreat_penalty = 0.3
 near_goal_osc_penalty = 0.15
 
-[fragments.eval_fallback]
+[fragments.eval_fb]
 eval_fallback = true
 eval_fallback_goal_radius = 3.0
 eval_fallback_stagnation = 4
@@ -58,25 +70,25 @@ eval_fallback_max_uses = 1
 
 [train_local_pool_ppo]
 inherits = [
-  "fragments.subtask_data",
-  "fragments.train_eval_schedule",
-  "fragments.optimizer",
-  "fragments.planner_guide",
-  "fragments.bc_dagger",
-  "fragments.near_goal_fix",
-  "fragments.eval_fallback",
+  "fragments.data",
+  "fragments.train_eval",
+  "fragments.optim",
+  "fragments.obs_v2",
+  "fragments.bc",
+  "fragments.near",
+  "fragments.eval_fb",
 ]
-save = "checkpoints_local_pool_subtask_bcdagger"
+save = "checkpoints_local_v2"
 steps = 500000
 envs = 8
 
 [failure_case_report]
 inherits = [
-  "fragments.subtask_data",
-  "fragments.planner_eval",
+  "fragments.data",
+  "fragments.obs_v2",
 ]
-model = "checkpoints_local_pool_subtask_bcdagger/policy_best.pt"
-output_dir = "analysis/subtask_bcdagger_failure_report"
+model = "checkpoints_local_v2/policy_best.pt"
+output_dir = "analysis/local_v2_eval10"
 max_steps = 70
 limit = 0
 save_fail_maps = 40
@@ -84,11 +96,11 @@ progress_every = 100
 
 [failure_case_report_smoke]
 inherits = [
-  "fragments.subtask_data",
-  "fragments.planner_eval",
+  "fragments.data",
+  "fragments.obs_v2",
 ]
-model = "checkpoints_local_pool_subtask_bcdagger/policy_best.pt"
-output_dir = "analysis/subtask_bcdagger_failure_report_smoke"
+model = "checkpoints_local_v2/policy_best.pt"
+output_dir = "analysis/local_v2_eval10_smoke"
 max_steps = 70
 limit = 200
 save_fail_maps = 20
@@ -96,10 +108,10 @@ progress_every = 20
 
 [hierarchical_waypoint_eval]
 inherits = [
-  "fragments.planner_eval",
+  "fragments.obs_eval",
 ]
-model = "checkpoints_local_pool_subtask_bcdagger/policy_best.pt"
-output_dir = "analysis/hierarchical_50_eval_subtask_bcdagger"
+model = "checkpoints_local_v2/policy_best.pt"
+output_dir = "analysis/local_v2_eval50"
 episodes = 100
 max_steps = 220
 policy_view_size = 10

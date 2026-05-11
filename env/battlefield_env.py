@@ -1,8 +1,5 @@
-"""战场场景生成与通行检查模块。
-
-负责：地形加载、窗口采样、起点/终点/敌人选取、场景生成、
-通行性验证（攀爬约束 + 标签约束）、可见性计算（委托给 occlusion 模块）。
-"""
+﻿"""鎴樺満鍦烘櫙鐢熸垚涓庨€氳妫€鏌ユā鍧椼€?
+璐熻矗锛氬湴褰㈠姞杞姐€佺獥鍙ｉ噰鏍枫€佽捣鐐?缁堢偣/鏁屼汉閫夊彇銆佸満鏅敓鎴愩€?閫氳鎬ч獙璇侊紙鏀€鐖害鏉?+ 鏍囩绾︽潫锛夈€佸彲瑙佹€ц绠楋紙濮旀墭缁?occlusion 妯″潡锛夈€?"""
 
 from __future__ import annotations
 
@@ -14,6 +11,7 @@ from pathlib import Path
 import numpy as np
 
 from config import EnvConfig
+from env.obs import build_obs
 from env.terrain_loader import FullTerrain, load_terrain
 from env.occlusion import is_occluded
 from planner import StealthCostConfig, plan_stealth_path
@@ -51,8 +49,13 @@ class BattlefieldEnv:
         self.consecutive_collisions = 0
         self.total_collisions = 0
         self.current_progress_weight = self.config.progress_weight
+        self._obs_visited = np.zeros((self.grid_size, self.grid_size), dtype=np.float32)
+        self._obs_prev_move = np.zeros((2,), dtype=np.float32)
+        self._obs_goal_cache: tuple[int, int] | None = None
+        self._obs_goal_best_dist = 0.0
+        self._obs_goal_stagnation = 0
 
-        # ---- 全图模式状态 ----
+        # ---- 鍏ㄥ浘妯″紡鐘舵€?----
         self.full_terrain: FullTerrain | None = None
         self.enemy_pool: list[tuple[int, int]] = []
         self.full_visibility_maps: list[np.ndarray] = []
@@ -65,8 +68,7 @@ class BattlefieldEnv:
         self.generate_scene()
 
     # ============================================================
-    #  全图模式初始化
-    # ============================================================
+    #  鍏ㄥ浘妯″紡鍒濆鍖?    # ============================================================
 
     def _init_full_map_mode(self) -> None:
         self.full_terrain = load_terrain(self.config.full_map_path)
@@ -89,8 +91,7 @@ class BattlefieldEnv:
             self.full_visibility_maps = []
 
     # ============================================================
-    #  场景生成（公开入口）
-    # ============================================================
+    #  鍦烘櫙鐢熸垚锛堝叕寮€鍏ュ彛锛?    # ============================================================
 
     def generate_scene(
         self,
@@ -114,9 +115,10 @@ class BattlefieldEnv:
             self._build_fixed_scene()
 
         self.agent_position = self.start_position.copy()
+        self._reset_obs_state()
 
     # ============================================================
-    #  全图窗口场景生成
+    #  鍏ㄥ浘绐楀彛鍦烘櫙鐢熸垚
     # ============================================================
 
     def _generate_full_map_scene(
@@ -128,7 +130,7 @@ class BattlefieldEnv:
             raise RuntimeError("full_terrain 未加载")
 
         if not self.enemy_pool:
-            raise RuntimeError("敌人池为空，请先运行 enemy_search.py 生成")
+            raise RuntimeError("鏁屼汉姹犱负绌猴紝璇峰厛杩愯 enemy_search.py 鐢熸垚")
 
         enemy_idx = int(rng.integers(0, len(self.enemy_pool)))
         enemy_global = self.enemy_pool[enemy_idx]
@@ -147,13 +149,13 @@ class BattlefieldEnv:
         max_ox = ft.full_width - self.grid_size
         max_oy = ft.full_height - self.grid_size
 
-        # 指定窗口偏移量时跳过随机搜索
+        # 鎸囧畾绐楀彛鍋忕Щ閲忔椂璺宠繃闅忔満鎼滅储
         offsets_to_try: list[tuple[int, int]]
         if window_offset is not None:
             ox, oy = window_offset
             if not (0 <= ox <= max_ox and 0 <= oy <= max_oy):
-                raise ValueError(f"window_offset {window_offset} 超出范围 "
-                                 f"[0,{max_ox}] × [0,{max_oy}]")
+                raise ValueError(f"window_offset {window_offset} 瓒呭嚭鑼冨洿 "
+                                 f"[0,{max_ox}] 脳 [0,{max_oy}]")
             offsets_to_try = [(ox, oy)]
         else:
             offsets_to_try = [(int(rng.integers(0, max_ox + 1)),
@@ -185,10 +187,10 @@ class BattlefieldEnv:
 
             return
 
-        raise RuntimeError(f"无法为 scene_seed={scene_seed} 生成可达窗口场景")
+        raise RuntimeError(f"鏃犳硶涓?scene_seed={scene_seed} 鐢熸垚鍙揪绐楀彛鍦烘櫙")
 
     def _sample_start_goal_in_window(self, rng: np.random.Generator) -> tuple[tuple[int, int], tuple[int, int]]:
-        # 这里后续考虑把这个corner_span解耦到config当中进行配置
+        # 杩欓噷鍚庣画鑰冭檻鎶婅繖涓猚orner_span瑙ｈ€﹀埌config褰撲腑杩涜閰嶇疆
         corner_span = 15
         start_pool = [(x, y) for x in range(min(corner_span, self.grid_size))
                       for y in range(min(corner_span, self.grid_size))
@@ -213,7 +215,7 @@ class BattlefieldEnv:
                 continue
             return s, g
 
-        # 回退：找任意一对距离够远的可通行格子
+        # 鍥為€€锛氭壘浠绘剰涓€瀵硅窛绂诲杩滅殑鍙€氳鏍煎瓙
         all_free = [(x, y) for x in range(self.grid_size) for y in range(self.grid_size)
                     if self.window_tag_map is not None and self.window_tag_map[x, y] == 0]
         if len(all_free) >= 2:
@@ -238,8 +240,7 @@ class BattlefieldEnv:
         return self.compute_bfs_path() is not None
 
     # ============================================================
-    #  通行检查（tan 爬坡 + tag 约束）
-    # ============================================================
+    #  閫氳妫€鏌ワ紙tan 鐖潯 + tag 绾︽潫锛?    # ============================================================
 
     def can_move_between(self, current: tuple[int, int], candidate: tuple[int, int]) -> bool:
         current_height = self._cell_height(current)
@@ -249,7 +250,7 @@ class BattlefieldEnv:
             return True
         dx = abs(candidate[0] - current[0])
         dy = abs(candidate[1] - current[1])
-        # 判断是否对角移动
+        # 鍒ゆ柇鏄惁瀵硅绉诲姩
         if dx + dy == 2:
             dist = self.config.cell_size * sqrt(2.0)
         else:
@@ -284,7 +285,7 @@ class BattlefieldEnv:
         return valid_actions
 
     # ============================================================
-    #  RL 接口
+    #  RL 鎺ュ彛
     # ============================================================
 
     def reset(self, seed: int | None = None) -> np.ndarray:
@@ -302,6 +303,7 @@ class BattlefieldEnv:
         old_pos = self.agent_position.copy()
         move = np.array(self.ACTIONS[action], dtype=np.int32)
         candidate = old_pos + move
+        moved = False
 
         if self._is_blocked(candidate):
             self.consecutive_collisions += 1
@@ -310,6 +312,7 @@ class BattlefieldEnv:
         else:
             self.agent_position = candidate.copy()
             self.consecutive_collisions = 0
+            moved = True
             reward = -self.config.step_penalty
 
             old_dist = float(np.linalg.norm(
@@ -322,6 +325,7 @@ class BattlefieldEnv:
                 reward -= self.config.visible_penalty
 
         self.steps += 1
+        self._update_obs_state(old_pos=old_pos, moved=moved)
         done = False
         info: dict = {}
 
@@ -341,57 +345,7 @@ class BattlefieldEnv:
         return self._get_observation(), reward, done, info
 
     def _get_observation(self) -> np.ndarray:
-        H, W = self.grid_size, self.grid_size
-
-        ch_height = self.height_map.astype(np.float32) / max(1.0, float(self.height_levels))
-
-        if self.window_tag_map is not None:
-            ch_ground = (self.window_tag_map == 0).astype(np.float32)
-            ch_building = (self.window_tag_map == 1).astype(np.float32)
-            ch_tree = (self.window_tag_map == 2).astype(np.float32)
-        else:
-            ch_ground = np.ones((H, W), dtype=np.float32)
-            ch_building = np.zeros((H, W), dtype=np.float32)
-            ch_tree = np.zeros((H, W), dtype=np.float32)
-
-        ch_vis = self.visibility_map.astype(np.float32)
-
-        ax, ay = int(self.agent_position[0]), int(self.agent_position[1])
-        ch_agent = np.zeros((H, W), dtype=np.float32)
-        ch_agent[ax, ay] = 1.0
-
-        gx, gy = int(self.goal_position[0]), int(self.goal_position[1])
-        ch_goal = np.zeros((H, W), dtype=np.float32)
-        ch_goal[gx, gy] = 1.0
-        # 相对子目标向量编码：在整图复制归一化 dx/dy，给策略显式方向信号
-        dx = (gx - ax) / max(1.0, float(W - 1))
-        dy = (gy - ay) / max(1.0, float(H - 1))
-        ch_rel_dx = np.full((H, W), dx, dtype=np.float32)
-        ch_rel_dy = np.full((H, W), dy, dtype=np.float32)
-
-        # 局部引导通道：沿 agent->goal 连线的高斯带，帮助策略学习“朝向子目标”
-        yy, xx = np.mgrid[0:H, 0:W]
-        p0 = np.array([ax, ay], dtype=np.float32)
-        p1 = np.array([gx, gy], dtype=np.float32)
-        v = p1 - p0
-        denom = float(v[0] * v[0] + v[1] * v[1]) + 1e-6
-        t = ((xx - p0[0]) * v[0] + (yy - p0[1]) * v[1]) / denom
-        t = np.clip(t, 0.0, 1.0)
-        proj_x = p0[0] + t * v[0]
-        proj_y = p0[1] + t * v[1]
-        dist2 = (xx - proj_x) ** 2 + (yy - proj_y) ** 2
-        sigma2 = max(1.0, float(self.grid_size) * 0.08) ** 2
-        ch_guide = np.exp(-dist2 / (2.0 * sigma2)).astype(np.float32)
-
-        channels = [
-            ch_height, ch_ground, ch_building, ch_tree, ch_vis,
-            ch_agent, ch_goal, ch_rel_dx, ch_rel_dy, ch_guide,
-        ]
-        if self.config.planner_guide_channel:
-            channels.append(self._planner_corridor_channel())
-
-        obs = np.stack(channels, axis=0)
-        return obs.astype(np.float32)
+        return build_obs(self)
 
     def _planner_cfg(self) -> StealthCostConfig:
         return StealthCostConfig(
@@ -429,11 +383,9 @@ class BattlefieldEnv:
         return mask
 
     def compute_bfs_path(self) -> list[tuple[int, int]] | None:
-        """BFS 最短路径搜索，使用与可达性检查完全相同的通行规则。
-
+        """BFS 鏈€鐭矾寰勬悳绱紝浣跨敤涓庡彲杈炬€ф鏌ュ畬鍏ㄧ浉鍚岀殑閫氳瑙勫垯銆?
         Returns:
-            从 start_position 到 goal_position 的格子序列（含起终点），无路径时返回 None。
-        """
+            浠?start_position 鍒?goal_position 鐨勬牸瀛愬簭鍒楋紙鍚捣缁堢偣锛夛紝鏃犺矾寰勬椂杩斿洖 None銆?        """
         start = tuple(self.start_position.tolist())
         goal = tuple(self.goal_position.tolist())
         queue: deque[tuple[int, int]] = deque([start])
@@ -462,8 +414,7 @@ class BattlefieldEnv:
         return None
 
     # ============================================================
-    #  可见性与遮挡（委托给 env.occlusion）
-    # ============================================================
+    #  鍙鎬т笌閬尅锛堝鎵樼粰 env.occlusion锛?    # ============================================================
 
     def _finalize_scene_maps(self) -> None:
         self.occupancy_map = (self.height_map.astype(np.float32) / max(1.0, float(self.height_levels))).astype(np.float32)
@@ -509,7 +460,7 @@ class BattlefieldEnv:
         return float(self.height_map[cell])
 
     # ============================================================
-    #  固定场景 / 随机场景
+    #  鍥哄畾鍦烘櫙 / 闅忔満鍦烘櫙
     # ============================================================
 
     def _build_fixed_scene(self) -> None:
@@ -553,7 +504,7 @@ class BattlefieldEnv:
             if self._has_feasible_path():
                 return
 
-        raise RuntimeError(f"无法为 scene_seed={scene_seed} 生成可达场景")
+        raise RuntimeError(f"鏃犳硶涓?scene_seed={scene_seed} 鐢熸垚鍙揪鍦烘櫙")
 
     def _place_random_obstacles(self, rng: np.random.Generator) -> None:
         base = rng.integers(0, self.height_levels + 1, size=(self.grid_size, self.grid_size), dtype=np.int32)
@@ -684,12 +635,64 @@ class BattlefieldEnv:
         return score
 
     # ============================================================
-    #  工具方法
+    #  宸ュ叿鏂规硶
     # ============================================================
 
     def _goal_distance(self, position: np.ndarray) -> float:
         return float(np.linalg.norm(self.goal_position.astype(np.float32) - position.astype(np.float32)))
 
+    def set_goal(self, goal: tuple[int, int] | np.ndarray) -> None:
+        self.goal_position = np.array(goal, dtype=np.int32)
+        self._sync_obs_goal(force=True)
+
+    def _reset_obs_state(self) -> None:
+        self._obs_visited = np.zeros((self.grid_size, self.grid_size), dtype=np.float32)
+        self._obs_prev_move = np.zeros((2,), dtype=np.float32)
+        self._obs_goal_cache = None
+        self._obs_goal_best_dist = self._goal_distance(self.agent_position)
+        self._obs_goal_stagnation = 0
+        self._sync_obs_goal(force=True)
+        self._mark_visit()
+
+    def _ensure_obs_state(self) -> None:
+        if self._obs_visited.shape != (self.grid_size, self.grid_size):
+            self._obs_visited = np.zeros((self.grid_size, self.grid_size), dtype=np.float32)
+        self._sync_obs_goal(force=False)
+
+    def _sync_obs_goal(self, force: bool) -> None:
+        goal = (int(self.goal_position[0]), int(self.goal_position[1]))
+        if force or self._obs_goal_cache != goal:
+            self._obs_goal_cache = goal
+            self._obs_goal_best_dist = self._goal_distance(self.agent_position)
+            self._obs_goal_stagnation = 0
+
+    def _mark_visit(self) -> None:
+        decay = float(np.clip(self.config.obs_visit_decay, 0.0, 1.0))
+        self._obs_visited *= decay
+        ax, ay = int(self.agent_position[0]), int(self.agent_position[1])
+        if 0 <= ax < self.grid_size and 0 <= ay < self.grid_size:
+            self._obs_visited[ax, ay] = 1.0
+
+    def _update_obs_state(self, old_pos: np.ndarray, moved: bool) -> None:
+        self._sync_obs_goal(force=False)
+        if moved:
+            self._obs_prev_move = np.clip(
+                self.agent_position.astype(np.float32) - old_pos.astype(np.float32),
+                -1.0,
+                1.0,
+            )
+        else:
+            self._obs_prev_move = np.zeros((2,), dtype=np.float32)
+
+        new_dist = self._goal_distance(self.agent_position)
+        if new_dist + 1e-4 < self._obs_goal_best_dist:
+            self._obs_goal_best_dist = new_dist
+            self._obs_goal_stagnation = 0
+        else:
+            self._obs_goal_stagnation += 1
+        self._mark_visit()
+
     @staticmethod
     def _move_cost(move: np.ndarray) -> float:
         return sqrt(2.0) if abs(int(move[0])) + abs(int(move[1])) == 2 else 1.0
+

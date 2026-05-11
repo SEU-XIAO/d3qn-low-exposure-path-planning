@@ -60,7 +60,7 @@ class VectorizedEnv:
         env.height_map = self.pool["heights"][idx].copy()
         env.window_tag_map = self.pool["tags"][idx].copy()
         env.start_position = self.pool["starts"][idx].copy()
-        env.goal_position = self.pool["goals"][idx].copy()
+        env.set_goal(self.pool["goals"][idx].copy())
 
         if "visibility" in self.pool:
             env.visibility_map = self.pool["visibility"][idx].copy().astype(np.float32)
@@ -80,6 +80,7 @@ class VectorizedEnv:
         env.consecutive_collisions = 0
         env.total_collisions = 0
         env.current_progress_weight = env.config.progress_weight
+        env._reset_obs_state()
         return env._get_observation()
 
     def reset_env_to_index(self, env_idx: int, scene_idx: int) -> np.ndarray:

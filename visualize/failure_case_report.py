@@ -10,6 +10,7 @@ import numpy as np
 import torch
 
 from config import EnvConfig
+from env.obs import add_obs_args
 from env.vectorized_env import VectorizedEnv
 from experiment_config import add_config_args, parse_args_with_config
 from models.actor_critic_cnn import ActorCriticCNN, infer_model_spec
@@ -98,6 +99,7 @@ def _render_ascii_map(env, trajectory: list[list[int]]) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Evaluate model and export failure cases on fixed val split", allow_abbrev=False)
     add_config_args(parser, default_section="failure_case_report")
+    add_obs_args(parser)
     parser.add_argument("--pool", type=str, default="artifacts/window_pool_10.npz")
     parser.add_argument("--model", type=str, required=True)
     parser.add_argument("--output-dir", type=str, default="analysis/failure_report")
@@ -106,6 +108,8 @@ def main() -> None:
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--limit", type=int, default=0, help="0 means evaluate full val set")
     parser.add_argument("--save-fail-maps", type=int, default=40, help="number of failed cases to render")
+    parser.add_argument("--progress-every", type=int, default=100, help="print progress every N episodes, 0 disables")
+    parser.add_argument("--planner-guide", action="store_true", help="在观测中加入 planner 走廊通道")
     parser.add_argument("--planner-guide-sigma", type=float, default=1.4)
     parser.add_argument("--planner-w-len", type=float, default=1.0)
     parser.add_argument("--planner-w-vis", type=float, default=2.5)
@@ -141,8 +145,17 @@ def main() -> None:
         EnvConfig(),
         grid_size=grid_size,
         local_map_size=grid_size,
+        obs_view_size=args.obs_view_size,
         max_steps=args.max_steps,
-        planner_guide_channel=expected_channels > 10,
+        obs_line_guide=args.obs_line_guide,
+        obs_line_sigma=args.obs_line_sigma,
+        obs_use_visited=args.obs_visited,
+        obs_use_remaining=args.obs_remaining,
+        obs_use_stagnation=args.obs_stagnation,
+        obs_stagnation_cap=args.obs_stagnation_cap,
+        obs_use_prev_move=args.obs_prev_move,
+        obs_visit_decay=args.obs_visit_decay,
+        planner_guide_channel=args.planner_guide,
         planner_guide_sigma=args.planner_guide_sigma,
         planner_w_len=args.planner_w_len,
         planner_w_vis=args.planner_w_vis,
@@ -166,6 +179,12 @@ def main() -> None:
 
     rows: list[dict] = []
     fail_saved = 0
+
+    total_eval = len(val_indices)
+    print(
+        f"Start evaluation: n_eval={total_eval}, "
+        f"limit={args.limit}, max_steps={args.max_steps}, device={device.type}"
+    )
 
     for rank, scene_idx in enumerate(val_indices.tolist()):
         vec_env.reset_env_to_index(0, int(scene_idx))
@@ -211,6 +230,20 @@ def main() -> None:
                 f.write(str(episode["trajectory"]))
                 f.write("\n")
             fail_saved += 1
+
+        if args.progress_every > 0 and ((rank + 1) % args.progress_every == 0 or (rank + 1) == total_eval):
+            partial_n = len(rows)
+            partial_succ = sum(r["success"] for r in rows)
+            partial_timeout = sum(1 for r in rows if r["result"] == "timeout")
+            partial_avg_steps = float(np.mean([r["steps"] for r in rows])) if partial_n else 0.0
+            partial_avg_exposure = float(np.mean([r["exposure"] for r in rows])) if partial_n else 0.0
+            print(
+                f"[progress] {rank + 1}/{total_eval} "
+                f"success={partial_succ / max(1, partial_n):.3f} "
+                f"timeout={partial_timeout / max(1, partial_n):.3f} "
+                f"avg_steps={partial_avg_steps:.2f} "
+                f"avg_exposure={partial_avg_exposure:.4f}"
+            )
 
     n = len(rows)
     succ = sum(r["success"] for r in rows)
